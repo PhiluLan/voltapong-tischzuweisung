@@ -28,8 +28,9 @@ Der aktuelle Algorithmus arbeitet so:
 2. Der Buchungswert `weight` bestimmt die Anzahl benötigter Tische; fehlt oder passt er nicht, gilt `1`.
 3. Überschneidende, bereits zugewiesene Buchungen derselben Ressource markieren Tische als belegt.
 4. Der Dienst wählt zuerst eine zusammenhängende Tischgruppe, danach beliebige freie Tische.
-5. Reichen die freien Tische nicht, wird die Buchung als `unassigned` gespeichert und in Anny entsprechend markiert.
-6. Die Zuweisung wird in `customer_note`, `note` und `description` der Anny-Buchung geschrieben.
+5. Erscheint die Kapazität lokal voll, werden die blockierenden Buchungen nochmals bei Anny geprüft. Bestätigte Stornos und gelöschte Buchungen werden aus SQLite entfernt und die Tischwahl wird sofort wiederholt.
+6. Reichen die freien Tische danach weiterhin nicht, wird die Buchung als `unassigned` gespeichert und in Anny entsprechend markiert.
+7. Die Zuweisung wird in `customer_note`, `note` und `description` der Anny-Buchung geschrieben.
 
 Eine detaillierte Beschreibung steht in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Der rekonstruierte Ist-Zustand und alle bekannten Risiken stehen in [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md).
 
@@ -45,6 +46,8 @@ curl http://127.0.0.1:8099/health
 ```
 
 Persistente Laufzeitdaten landen unter `./data/` und werden nicht versioniert.
+
+Das geschützte Mitarbeiter-Dashboard ist danach unter `http://127.0.0.1:8099/dashboard` erreichbar. Der Browser fragt nach `DASHBOARD_USERNAME` und `DASHBOARD_PASSWORD` aus der lokalen `.env`.
 
 ## Lokale Entwicklung
 
@@ -66,9 +69,11 @@ Die Tests verwenden ausschließlich Dummy-Zugangsdaten und eine temporäre SQLit
 | --- | --- | --- |
 | `GET` | `/health` | Prozess- und Erreichbarkeitsprüfung |
 | `POST` | `/` | Anny-Webhook für `bookings.created`, `bookings.updated` und `bookings.deleted` |
-| `GET` | `/allocations` | Gesamten lokalen Zuweisungsbestand ausgeben |
+| `GET` | `/dashboard` | Geschützter, laienverständlicher Systemstatus |
+| `GET` | `/dashboard/data` | Aggregierte Statusdaten ohne Kundennamen oder Kontaktdaten |
+| `GET` | `/allocations` | Geschützter vollständiger lokaler Zuweisungsbestand |
 
-`/allocations` ist im aktuellen Code nicht geschützt und enthält operative Buchungsdaten. Dieser Endpunkt darf erst nach einer Absicherung öffentlich erreichbar sein.
+Dashboard, Statusdaten und `/allocations` sind über HTTP Basic Auth geschützt und arbeiten ohne konfigurierte Zugangsdaten absichtlich nicht. `/health` bleibt für Monitoring öffentlich.
 
 ## Konfiguration
 
@@ -84,6 +89,9 @@ Die Tests verwenden ausschließlich Dummy-Zugangsdaten und eine temporäre SQLit
 | `AUTO_MARKER` | Marker im Beschreibungstext | `TISCHE:` |
 | `AUTO_PREFIX` | Präfix der internen Notiz | `Auto-Allocation:` |
 | `WEBHOOK_SECRET` | Secret für Header `X-Webhook-Secret` | erforderlich für Produktion |
+| `DASHBOARD_USERNAME` | Benutzername für Dashboard und `/allocations` | erforderlich |
+| `DASHBOARD_PASSWORD` | langes, eigenständiges Dashboard-Passwort | erforderlich |
+| `DASHBOARD_REFRESH_SECONDS` | Aktualisierungsintervall des Dashboards | `30`, mindestens `10` |
 | `DEBUG` | Debug-Ausgaben | `0` |
 
 Die historische Abwärtskompatibilität akzeptiert das Webhook-Secret zusätzlich als Query-Parameter `key`. Für neue Konfigurationen sollte ausschließlich der Header verwendet werden, weil Query-Strings häufig in Logs landen.
@@ -94,7 +102,7 @@ Die historische Abwärtskompatibilität akzeptiert das Webhook-Secret zusätzlic
 - [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md): belegter Produktionsstand und priorisierte Baustellen
 - [SECURITY.md](SECURITY.md): Secret- und Datenschutzregeln
 
-Der Anwendungscode in diesem ersten Repository-Stand ist eine unveränderte Sicherung der zuletzt lokal gefundenen Version vom 2. März 2026. Ob exakt diese Datei auf dem Produktionsserver läuft, konnte ohne Serverzugriff nicht verifiziert werden. Vor dem nächsten Deployment ist deshalb ein Dateivergleich mit `/opt/anny_webhook/app.py` zwingend.
+Das Repository wurde aus der zuletzt lokal gefundenen Version vom 2. März 2026 aufgebaut und wird seitdem als Entwicklungsbasis weitergeführt. Die Produktionsinstanz zeigt dieselben ursprünglichen Routen und ein identisches ursprüngliches OpenAPI-Dokument; ein bytegenauer Dateivergleich mit `/opt/anny_webhook/app.py` ist ohne Root-Zugang weiterhin offen. Dashboard und Kapazitäts-Selbstheilung sind noch nicht produktiv ausgerollt.
 
 ## Nicht im Projektumfang
 

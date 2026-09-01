@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import base64
+import secrets
 import os
 import json
 import sqlite3
@@ -7,10 +9,11 @@ import urllib.error
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -43,7 +46,13 @@ ALLOCATE_RESOURCE_IDS = set(
 # Webhook auth (supports BOTH header and query key)
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
 
-app = FastAPI()
+# Dashboard auth is deliberately fail-closed. There are no default credentials.
+DASHBOARD_USERNAME = os.environ.get("DASHBOARD_USERNAME", "").strip()
+DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "").strip()
+DASHBOARD_REFRESH_SECONDS = max(10, int(os.environ.get("DASHBOARD_REFRESH_SECONDS", "30")))
+DASHBOARD_TEMPLATE = Path(__file__).resolve().parent / "templates" / "dashboard.html"
+
+app = FastAPI(title="Volta Pong Tischzuweisung", version="2.0.0")
 
 
 def dprint(*a):
@@ -270,7 +279,12 @@ def delete_allocation(booking_id: str):
         conn.commit()
 
 
-def list_overlapping_allocations(window_start: datetime, window_end: datetime, resource_id: str) -> List[Allocation]:
+def list_overlapping_allocations(
+    window_start: datetime,
+    window_end: datetime,
+    resource_id: str,
+    exclude_booking_id: Optional[str] = None,
+) -> List[Allocation]:
     # Note: we consider only assigned allocations for busy-map
     with db() as conn:
         rows = conn.execute(
@@ -280,6 +294,8 @@ def list_overlapping_allocations(window_start: datetime, window_end: datetime, r
 
     out: List[Allocation] = []
     for r in rows:
+        if exclude_booking_id is not None and str(r["booking_id"]) == str(exclude_booking_id):
+            continue
         try:
             s = parse_iso(r["start_date"])
             e = parse_iso(r["end_date"])
@@ -322,6 +338,38 @@ def pick_any_free_group(need: int, busy: Dict[str, bool]) -> Optional[List[str]]
     if len(free) < need:
         return None
     return free[:need]
+
+
+def build_busy_map(
+    window_start: datetime,
+    window_end: datetime,
+    resource_id: str,
+    exclude_booking_id: Optional[str] = None,
+) -> Dict[str, bool]:
+    busy = {table: False for table in TABLES}
+    overlapping = list_overlapping_allocations(
+        window_start,
+        window_end,
+        resource_id=resource_id,
+        exclude_booking_id=exclude_booking_id,
+    )
+    for allocation in overlapping:
+        for table in allocation.tables:
+            if table in busy:
+                busy[table] = True
+    return busy
+
+
+def choose_group(need: int, busy: Dict[str, bool]) -> Tuple[Optional[List[str]], str, bool]:
+    group = pick_adjacent_group(need, busy)
+    if group:
+        return group, "adjacent", False
+
+    group = pick_any_free_group(need, busy)
+    if group:
+        return group, "any_free", True
+
+    return None, "unassigned", False
 
 
 def compute_need(booking_weight: Optional[int]) -> int:
@@ -395,6 +443,70 @@ def is_booking_canceled(attrs: Dict[str, Any]) -> Tuple[bool, str, Any]:
         "canceled", "cancelled", "rejected", "declined", "denied", "void", "refunded"
     )
     return is_c, status, canceled_at
+
+
+def response_is_not_found(response: Dict[str, Any]) -> bool:
+    for error in response.get("errors") or []:
+        if str(error.get("status") or "") == "404":
+            return True
+    return False
+
+
+def cleanup_stale_overlapping_allocations(
+    window_start: datetime,
+    window_end: datetime,
+    resource_id: str,
+    exclude_booking_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Remove confirmed canceled/deleted blockers before declaring a capacity failure.
+
+    This intentionally runs only after the local allocation map has no room. It
+    makes missed cancellation webhooks self-healing without adding Anny API
+    traffic to every normal booking. Unknown API failures remain fail-closed.
+    """
+    candidates = list_overlapping_allocations(
+        window_start,
+        window_end,
+        resource_id=resource_id,
+        exclude_booking_id=exclude_booking_id,
+    )
+    removed: List[Dict[str, str]] = []
+    api_errors: List[Dict[str, Any]] = []
+
+    for allocation in candidates:
+        booking = fetch_booking(allocation.booking_id)
+        if "errors" in booking:
+            if response_is_not_found(booking):
+                delete_allocation(allocation.booking_id)
+                removed.append({"booking_id": allocation.booking_id, "reason": "BOOKING_NOT_FOUND"})
+            else:
+                api_errors.append({"booking_id": allocation.booking_id, "errors": booking.get("errors") or []})
+                # A general Anny outage would otherwise multiply the request
+                # timeout by every occupied table. Keep all remaining rows
+                # blocked and stop this best-effort reconciliation early.
+                break
+            continue
+
+        attrs = (booking.get("data") or {}).get("attributes") or {}
+        canceled, status, _ = is_booking_canceled(attrs)
+        if canceled:
+            delete_allocation(allocation.booking_id)
+            removed.append(
+                {
+                    "booking_id": allocation.booking_id,
+                    "reason": "BOOKING_CANCELED",
+                    "status": status,
+                }
+            )
+
+    return {
+        "attempted": True,
+        "checked": len(candidates),
+        "removed": removed,
+        "removed_count": len(removed),
+        "api_errors": api_errors,
+        "api_error_count": len(api_errors),
+    }
 
 
 def ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]:
@@ -491,26 +603,43 @@ def ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]
                 "mode": "reused",
             }
 
-    # Build busy map from OUR allocations
-    busy = {t: False for t in TABLES}
-    overlapping = list_overlapping_allocations(window_start, window_end, resource_id=resource_id)
-    for a in overlapping:
-        for t in a.tables:
-            if t in busy:
-                busy[t] = True
+    # Build busy map from OUR allocations. Never let an older allocation for
+    # the same booking block its own reallocation.
+    busy = build_busy_map(
+        window_start,
+        window_end,
+        resource_id=resource_id,
+        exclude_booking_id=str(booking_id),
+    )
+    group, mode, split = choose_group(need, busy)
 
-    # Option B:
-    # 1) adjacent-first
-    group = pick_adjacent_group(need, busy)
-    mode = "adjacent"
-    split = False
+    reconciliation: Dict[str, Any] = {
+        "attempted": False,
+        "checked": 0,
+        "removed": [],
+        "removed_count": 0,
+        "api_errors": [],
+        "api_error_count": 0,
+    }
 
-    # 2) fallback any-free
+    # If SQLite says "full", verify the blocking bookings against Anny before
+    # marking the new booking unassigned. This repairs missed cancellation or
+    # deletion webhooks at the exact moment their stale rows would cause harm.
     if not group:
-        group = pick_any_free_group(need, busy)
-        if group:
-            mode = "any_free"
-            split = True
+        reconciliation = cleanup_stale_overlapping_allocations(
+            window_start,
+            window_end,
+            resource_id=resource_id,
+            exclude_booking_id=str(booking_id),
+        )
+        if reconciliation["removed_count"]:
+            busy = build_busy_map(
+                window_start,
+                window_end,
+                resource_id=resource_id,
+                exclude_booking_id=str(booking_id),
+            )
+            group, mode, split = choose_group(need, busy)
 
     # 3) if still none -> truly not enough free tables
     if not group:
@@ -544,6 +673,7 @@ def ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]
             "service_id": service_id,
             "need": need,
             "busy": busy,
+            "reconciliation": reconciliation,
             "patch": patch_res,
         }
 
@@ -575,6 +705,7 @@ def ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]
         "tables": group,
         "patch": patch_res,
         "mode": mode,
+        "reconciliation": reconciliation,
     }
 
 
@@ -639,12 +770,251 @@ def check_webhook_auth(req: Request) -> Optional[JSONResponse]:
     return JSONResponse({"ok": False, "reason": "UNAUTHORIZED"}, status_code=401)
 
 
+def check_dashboard_auth(req: Request) -> Optional[JSONResponse]:
+    if not DASHBOARD_USERNAME or not DASHBOARD_PASSWORD:
+        return JSONResponse(
+            {
+                "ok": False,
+                "reason": "DASHBOARD_NOT_CONFIGURED",
+                "detail": "DASHBOARD_USERNAME und DASHBOARD_PASSWORD müssen gesetzt sein.",
+            },
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    authorization = req.headers.get("Authorization", "")
+    scheme, separator, encoded = authorization.partition(" ")
+    username = ""
+    password = ""
+    if separator and scheme.lower() == "basic":
+        try:
+            decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+            username, found_separator, password = decoded.partition(":")
+            if not found_separator:
+                username = ""
+                password = ""
+        except Exception:
+            username = ""
+            password = ""
+
+    username_ok = secrets.compare_digest(username, DASHBOARD_USERNAME)
+    password_ok = secrets.compare_digest(password, DASHBOARD_PASSWORD)
+    if username_ok and password_ok:
+        return None
+
+    return JSONResponse(
+        {"ok": False, "reason": "UNAUTHORIZED"},
+        status_code=401,
+        headers={
+            "WWW-Authenticate": 'Basic realm="Volta Pong Systemstatus", charset="UTF-8"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+def list_allocation_rows() -> List[Dict[str, Any]]:
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM allocations ORDER BY start_date ASC").fetchall()
+    return [{k: row[k] for k in row.keys()} for row in rows]
+
+
+def normalized_datetime(value: str) -> datetime:
+    parsed = parse_iso(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def dashboard_snapshot(now: Optional[datetime] = None) -> Dict[str, Any]:
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    else:
+        current_time = current_time.astimezone(timezone.utc)
+
+    raw_rows = list_allocation_rows()
+    parsed_rows: List[Dict[str, Any]] = []
+    invalid_rows: List[Dict[str, str]] = []
+
+    for row in raw_rows:
+        try:
+            start = normalized_datetime(str(row.get("start_date") or ""))
+            end = normalized_datetime(str(row.get("end_date") or ""))
+        except Exception:
+            invalid_rows.append(
+                {
+                    "booking_number": str(row.get("booking_number") or "Unbekannt"),
+                    "reason": "Ungültiger Zeitraum",
+                }
+            )
+            continue
+
+        public = {
+            "booking_number": str(row.get("booking_number") or "Unbekannt"),
+            "resource_id": str(row.get("resource_id") or ""),
+            "service_id": str(row.get("service_id") or ""),
+            "start_date": str(row.get("start_date") or ""),
+            "end_date": str(row.get("end_date") or ""),
+            "need": int(row.get("need") or 0),
+            "tables": [table for table in str(row.get("tables_csv") or "").split(",") if table],
+            "status": str(row.get("status") or "unknown"),
+            "updated_at": str(row.get("updated_at") or ""),
+        }
+        parsed_rows.append({"start": start, "end": end, "public": public})
+
+    active_or_future = [item for item in parsed_rows if item["end"] > current_time]
+    current_assigned = [
+        item
+        for item in active_or_future
+        if item["public"]["status"] == "assigned" and item["start"] <= current_time < item["end"]
+    ]
+    future_unassigned = [item for item in active_or_future if item["public"]["status"] == "unassigned"]
+
+    configured_resources = sorted(ALLOCATE_RESOURCE_IDS)
+    observed_resources = sorted(
+        {item["public"]["resource_id"] for item in active_or_future if item["public"]["resource_id"]}
+    )
+    resource_ids = configured_resources or observed_resources
+    resource_summaries: List[Dict[str, Any]] = []
+    for resource_id in resource_ids:
+        occupied = sorted(
+            {
+                table
+                for item in current_assigned
+                if item["public"]["resource_id"] == resource_id
+                for table in item["public"]["tables"]
+            },
+            key=lambda table: TABLES.index(table) if table in TABLES else len(TABLES),
+        )
+        resource_summaries.append(
+            {
+                "resource_id": resource_id,
+                "occupied_tables": occupied,
+                "free_tables": [table for table in TABLES if table not in occupied],
+                "occupied_count": len(occupied),
+                "free_count": max(0, len(TABLES) - len(occupied)),
+            }
+        )
+
+    collisions: List[Dict[str, Any]] = []
+    assigned_active_or_future = [
+        item for item in active_or_future if item["public"]["status"] == "assigned"
+    ]
+    for index, first in enumerate(assigned_active_or_future):
+        for second in assigned_active_or_future[index + 1:]:
+            first_public = first["public"]
+            second_public = second["public"]
+            if first_public["resource_id"] != second_public["resource_id"]:
+                continue
+            if not overlaps(first["start"], first["end"], second["start"], second["end"]):
+                continue
+            shared_tables = sorted(set(first_public["tables"]) & set(second_public["tables"]))
+            if shared_tables:
+                collisions.append(
+                    {
+                        "booking_numbers": [
+                            first_public["booking_number"],
+                            second_public["booking_number"],
+                        ],
+                        "tables": shared_tables,
+                    }
+                )
+
+    if collisions:
+        status = "error"
+        status_message = "Tischkollision erkannt – bitte sofort prüfen."
+    elif future_unassigned or invalid_rows:
+        status = "warning"
+        status_message = "Es gibt offene Zuweisungen oder fehlerhafte Datensätze."
+    elif not raw_rows:
+        status = "warning"
+        status_message = "Noch keine Zuweisungen in der Datenbank."
+    else:
+        status = "ok"
+        status_message = "Alles in Ordnung – aktuell sind keine Konflikte bekannt."
+
+    newest_update = max(
+        (str(row.get("updated_at") or "") for row in raw_rows),
+        default="",
+    )
+    primary_resource = resource_summaries[0] if resource_summaries else {
+        "resource_id": "",
+        "occupied_tables": [],
+        "free_tables": list(TABLES),
+        "occupied_count": 0,
+        "free_count": len(TABLES),
+    }
+    current_public = [item["public"] for item in sorted(current_assigned, key=lambda item: item["start"])]
+    upcoming_public = [
+        item["public"]
+        for item in sorted(active_or_future, key=lambda item: item["start"])
+        if item["start"] > current_time
+    ][:30]
+
+    return {
+        "ok": True,
+        "status": status,
+        "status_message": status_message,
+        "generated_at": current_time.isoformat(),
+        "refresh_seconds": DASHBOARD_REFRESH_SECONDS,
+        "summary": {
+            "total": len(raw_rows),
+            "assigned": sum(1 for row in raw_rows if row.get("status") == "assigned"),
+            "unassigned": sum(1 for row in raw_rows if row.get("status") == "unassigned"),
+            "active_or_future": len(active_or_future),
+            "current_bookings": len(current_assigned),
+            "occupied_now": primary_resource["occupied_count"],
+            "free_now": primary_resource["free_count"],
+            "future_unassigned": len(future_unassigned),
+            "collisions": len(collisions),
+            "invalid_rows": len(invalid_rows),
+            "last_update": newest_update,
+        },
+        "resources": resource_summaries,
+        "current": current_public,
+        "upcoming": upcoming_public,
+        "issues": {
+            "unassigned": [item["public"] for item in future_unassigned[:20]],
+            "collisions": collisions[:20],
+            "invalid_rows": invalid_rows[:20],
+        },
+        "configuration": {
+            "tables": TABLES,
+            "resource_ids": configured_resources,
+            "handle_updated": HANDLE_UPDATED,
+            "capacity_reconciliation": True,
+        },
+    }
+
+
 # -----------------------------
 # Routes
 # -----------------------------
 @app.get("/health")
 def health():
     return {"ok": True, "ts": iso_now()}
+
+
+@app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
+def dashboard(req: Request):
+    auth = check_dashboard_auth(req)
+    if auth:
+        return auth
+    if not DASHBOARD_TEMPLATE.is_file():
+        return HTMLResponse("Dashboard-Datei fehlt.", status_code=500)
+    html = DASHBOARD_TEMPLATE.read_text(encoding="utf-8").replace(
+        "__REFRESH_SECONDS__",
+        str(DASHBOARD_REFRESH_SECONDS),
+    )
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/dashboard/data", include_in_schema=False)
+def dashboard_data(req: Request):
+    auth = check_dashboard_auth(req)
+    if auth:
+        return auth
+    return JSONResponse(dashboard_snapshot(), headers={"Cache-Control": "no-store"})
 
 
 @app.post("/")
@@ -682,8 +1052,12 @@ async def webhook_root(req: Request):
 
 
 @app.get("/allocations")
-def allocations():
-    with db() as conn:
-        rows = conn.execute("SELECT * FROM allocations ORDER BY start_date ASC").fetchall()
-    out = [{k: r[k] for k in r.keys()} for r in rows]
-    return {"ok": True, "count": len(out), "items": out}
+def allocations(req: Request):
+    auth = check_dashboard_auth(req)
+    if auth:
+        return auth
+    out = list_allocation_rows()
+    return JSONResponse(
+        {"ok": True, "count": len(out), "items": out},
+        headers={"Cache-Control": "no-store"},
+    )

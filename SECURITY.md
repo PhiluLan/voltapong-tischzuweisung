@@ -4,7 +4,7 @@
 
 Folgende Inhalte dürfen nie in Git eingecheckt werden:
 
-- `.env` und echte Werte für `ANNY_TOKEN` oder `WEBHOOK_SECRET`
+- `.env` und echte Werte für `ANNY_TOKEN`, `WEBHOOK_SECRET` oder das Dashboard-Passwort
 - `allocator.db`, SQLite-Nebendateien und Datenbank-Backups
 - Server-Backups, Logs oder Exporte mit Buchungs- und Kundendaten
 
@@ -15,10 +15,14 @@ Bei der lokalen Bestandsaufnahme wurde ein zuvor kopierter echter Anny-Token in 
 ## Offene Sicherheitsaufgaben
 
 1. Anny-Token und Webhook-Secret rotieren.
-2. `/allocations` authentifizieren oder am Reverse Proxy nur intern freigeben.
+2. Den neuen Basic-Auth-Schutz für `/dashboard`, `/dashboard/data` und `/allocations` mit eigenständigen, langen Zugangsdaten produktiv konfigurieren. Bis zum Deployment bleibt `/allocations` auf der alten Produktionsversion öffentlich.
 3. Das Webhook-Secret ausschließlich im Header `X-Webhook-Secret` übertragen; die Query-Parameter-Kompatibilität anschließend entfernen.
 4. Service und Reverse Proxy mit minimalen Rechten betreiben und Datenbank-Backups verschlüsseln.
 5. Keine vollständigen Webhook-Payloads oder API-Header protokollieren.
+
+## Dashboard-Zugriff
+
+Der neue Code arbeitet fail-closed: Fehlen `DASHBOARD_USERNAME` oder `DASHBOARD_PASSWORD`, liefern Dashboard und `/allocations` HTTP 503 statt Daten öffentlich auszugeben. Die Zugangsdaten dürfen nicht mit dem Webhook-Secret oder dem Anny-Token identisch sein. Basic Auth ist ausschließlich über die vorhandene HTTPS-Domain zulässig.
 
 ## Meldung eines Problems
 

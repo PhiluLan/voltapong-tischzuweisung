@@ -56,9 +56,25 @@ Die Reihenfolge in `TABLE_LABELS` ist fachlich relevant:
 
 1. `adjacent`: erste ausreichend große zusammenhängende freie Gruppe.
 2. `any_free`: erste ausreichend große Auswahl beliebiger freier Tische; die interne Notiz erhält den Zusatz `(Split)`.
-3. `unassigned`: reichen alle freien Tische nicht, werden keine Tische vergeben und Anny erhält einen manuellen Warnhinweis.
+3. `capacity reconciliation`: erscheint die lokale Belegung voll, werden nur dann die überschneidenden Blocker erneut bei Anny geladen. Bestätigte Stornos und API-404-Buchungen werden entfernt; andere API-Fehler bleiben aus Sicherheitsgründen blockierend.
+4. Erneute Auswahl mit der bereinigten lokalen Belegung.
+5. `unassigned`: reichen die freien Tische weiterhin nicht, werden keine Tische vergeben und Anny erhält einen manuellen Warnhinweis.
 
 Die Strategie ist deterministisch, aber nicht global optimierend: sie minimiert weder spätere Fragmentierung noch löst sie alle Buchungen eines Tages gemeinsam.
+
+Die bedarfsabhängige Reconciliation schließt gezielt den kritischen Fall, dass Anny nach einem Storno wieder Kapazität freigibt, der entsprechende SQLite-Eintrag wegen eines verpassten Webhooks aber noch einen Tisch blockiert. Normale Buchungen mit ausreichend lokaler Kapazität verursachen keine zusätzlichen Anny-Abfragen. Bei einer Neuberechnung wird außerdem die eigene ältere Allocation der Buchung nicht als Fremdbelegung gewertet.
+
+## Mitarbeiter-Dashboard
+
+`GET /dashboard` zeigt den operativen Zustand ohne Kundennamen oder Kontaktdaten. Die Daten kommen aus `GET /dashboard/data` und werden alle 30 Sekunden aktualisiert. Beide Endpunkte sowie der vollständige `/allocations`-Export sind mit gemeinsamen, separaten Dashboard-Zugangsdaten geschützt.
+
+Die Ampel arbeitet deterministisch:
+
+- Grün: Datenbank enthält Zuweisungen, keine zukünftigen offenen Fälle und keine Tischkollision.
+- Gelb: zukünftige `unassigned`-Einträge, ungültige Zeitdaten oder eine noch leere Datenbank.
+- Rot: zwei zeitlich überschneidende Buchungen derselben Ressource verwenden dasselbe Tischlabel.
+
+Das Dashboard prüft den SQLite-Zustand. Es behauptet nicht, einen vollständigen Live-Abgleich aller Buchungen mit Anny durchzuführen.
 
 ## Rückschreiben nach Anny
 
@@ -91,7 +107,7 @@ Indizes bestehen auf Zeitfenster und Ressource. Die Datenbank wird beim Import d
 ## Konsistenzgrenzen
 
 - SQLite kennt nur Ereignisse, die den Dienst erreicht und erfolgreich bis zur lokalen Speicherung durchlaufen haben.
-- Der Dienst gleicht den gesamten Bestand nicht regelmäßig mit Anny ab.
+- Der Dienst gleicht den gesamten Bestand nicht regelmäßig mit Anny ab. Er prüft überlappende Blocker gezielt, wenn eine neue Zuweisung sonst wegen voller Kapazität scheitern würde.
 - Mehrere gleichzeitige Webhooks werden nicht durch eine fachliche Transaktion oder verteilte Sperre serialisiert.
 - Manuelle Änderungen in Anny können durch den `updated`-Schleifenschutz unbemerkt bleiben.
 - `unassigned`-Buchungen werden nicht automatisch erneut versucht, sobald später Tische frei werden.

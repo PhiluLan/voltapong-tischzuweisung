@@ -30,6 +30,14 @@ docker compose build
 
 Für einen lokalen Lauf mit echten Anny-Zugangsdaten muss der Webhook so geschützt sein, dass keine fremden Buchungs-IDs verarbeitet werden können.
 
+Dashboard lokal prüfen:
+
+```bash
+curl --user "$DASHBOARD_USERNAME:$DASHBOARD_PASSWORD" http://127.0.0.1:8099/dashboard/data
+```
+
+Das Passwort nicht direkt in gemeinsam sichtbare Shell-Historien schreiben. Der Befehl dient nur als Form; im normalen Betrieb wird `/dashboard` im Browser geöffnet und der Browser fragt nach den Zugangsdaten.
+
 ## Datenbank sichern
 
 Bei laufendem Container ist die SQLite-Backup-API sicherer als eine rohe Kopie der geöffneten Datei. Beispiel, falls Service und Volume wie in diesem Repository heißen:
@@ -46,11 +54,14 @@ Nach abgeschlossenem Vergleich:
 
 1. Repository in ein neues Release-Verzeichnis klonen oder per CI ein unveränderliches Image bauen.
 2. Produktions-`.env` aus dem Secret Store beziehungsweise direkt auf dem Host bereitstellen.
+   Zwingend neu setzen: `ANNY_TOKEN`, `WEBHOOK_SECRET`, `DASHBOARD_USERNAME` und `DASHBOARD_PASSWORD`.
 3. Bestehende Datenbank als Volume einbinden.
 4. Container bauen und starten.
 5. Intern `/health` prüfen, dann einen kontrollierten Test-Webhook verwenden.
-6. `/allocations` darf am öffentlichen Reverse Proxy nicht frei erreichbar sein.
-7. Logs und Anny-Buchung des kontrollierten Tests prüfen.
+6. `https://webhook.voltabreau.ch/dashboard` im Browser öffnen und Grün-/Gelb-/Rot-Anzeige sowie Basic Auth prüfen.
+7. `/allocations` ohne Zugangsdaten muss HTTP 401 liefern; mit Dashboard-Zugang darf der Endpunkt funktionieren.
+8. Logs und Anny-Buchung des kontrollierten Tests prüfen.
+9. Einen Storno-Test durchführen: acht zeitgleiche Tischzuweisungen simulieren beziehungsweise in einer sicheren Testzeit verwenden, eine blockierende Buchung stornieren und danach prüfen, dass die nächste Buchung den freigewordenen Tisch erhält.
 
 Ein Deployment darf nicht stillschweigend eine leere Datenbank anlegen, wenn die bestehende Produktionsdatenbank erwartet wird.
 
@@ -69,6 +80,7 @@ Vor dem Wechsel müssen altes Image beziehungsweise alter Code, vorherige Konfig
 - Dienst neu starten und einen reinen Lesezugriff testen.
 - Alten Token widerrufen.
 - Neues langes Webhook-Secret hinterlegen und in Anny konfigurieren.
+- Eigenständige Dashboard-Zugangsdaten erzeugen; nicht den Webhook-Key wiederverwenden.
 - Falls ein Secret in Logs oder Chat kopiert wurde, auch diese Kopien nach den geltenden Aufbewahrungsregeln behandeln.
 
 Secrets nie als Kommandozeilenargument in eine gemeinsam sichtbare Shell-Historie schreiben. Für die lokale Entwicklung gehören sie ausschließlich in die ignorierte `.env` mit restriktiven Dateirechten.
