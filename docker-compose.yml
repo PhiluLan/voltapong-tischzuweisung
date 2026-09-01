@@ -1,0 +1,25 @@
+services:
+  allocator:
+    build: .
+    init: true
+    ports:
+      - "8099:8099"
+    env_file:
+      - .env
+    environment:
+      ALLOCATOR_DB: /data/allocator.db
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8099/health', timeout=3)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
