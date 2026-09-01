@@ -1,6 +1,6 @@
 # Betrieb, Deployment und Wiederherstellung
 
-## Einmalige Bestandsaufnahme des Produktionsservers
+## Abgeschlossene Bestandsaufnahme des Produktionsservers
 
 Vor dem ersten Deployment aus Git müssen die tatsächlich laufenden Dateien gesichert und verglichen werden. Erwarteter historischer Pfad: `/opt/anny_webhook`.
 
@@ -13,7 +13,7 @@ Zu sichern beziehungsweise zu erfassen sind mindestens:
 - Containername, Image, Ports, Volumes und Restart-Policy
 - konsistentes Backup von `allocator.db`
 
-Der Root-Audit vom 1. September 2026 hat diese Punkte bis auf ein konsistentes Datenbank-Backup abgeschlossen. Live-Code und Container entsprechen der Baseline `7d57f67`; `/opt/anny_webhook/docker-compose.yml` und `Caddyfile` wurden mit `docker-compose.production.yml` beziehungsweise `Caddyfile` im Repository abgebildet.
+Der Root-Audit vom 1. September 2026 hat diese Punkte einschließlich mehrerer konsistenter Datenbank-Backups abgeschlossen. Nach isoliertem Smoke-Test und kontrolliertem End-to-End-Test läuft produktiv Commit `c261d029d8929582aa8d0628267c79003e0093be`. `/opt/anny_webhook/docker-compose.yml` und `Caddyfile` entsprechen `docker-compose.production.yml` beziehungsweise `Caddyfile` im Repository. Der belegte Live-Zustand steht in [CURRENT_STATE.md](CURRENT_STATE.md).
 
 ## Lokal prüfen
 
@@ -49,9 +49,9 @@ docker compose exec allocator python -c "import sqlite3; src=sqlite3.connect('/d
 
 Die erzeugte Datei anschließend außerhalb des öffentlich erreichbaren Verzeichnisses ablegen, Zugriffsrechte beschränken und nicht in Git übernehmen. Vor jedem Restore den Container stoppen und sowohl Original als auch Backup mit `PRAGMA integrity_check` prüfen.
 
-## Deployment-Zielbild
+## Kontrollierter Produktions-Deploymentablauf
 
-Nach abgeschlossenem Vergleich:
+Für jedes weitere Release:
 
 1. Repository in ein neues Release-Verzeichnis klonen oder per CI ein unveränderliches Image bauen.
 2. Produktions-`.env` aus dem Secret Store beziehungsweise direkt auf dem Host bereitstellen.

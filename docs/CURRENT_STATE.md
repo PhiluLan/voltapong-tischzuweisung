@@ -1,86 +1,132 @@
-# Rekonstruierter Ist-Zustand
+# Aktueller Produktionsstand
 
-Stand: 1. September 2026. Diese Datei trennt bewusst belegte Fakten von noch zu verifizierenden Annahmen.
+Stand: 1. September 2026, nach Live-Rollout und realem Storno-/Wiederbuchungstest.
 
-## Ausgangsbasis des Repositorys
+## Verbindlicher Stand
 
-Die Datei `app.py` entspricht bytegenau der zuletzt lokal auffindbaren, am 2. März 2026 gespeicherten VS-Code-Version. SHA-256:
+- GitHub-Branch: `main`
+- produktiver Commit: `c261d029d8929582aa8d0628267c79003e0093be`
+- öffentliche Adresse: `https://webhook.voltabreau.ch`
+- Dashboard: `https://webhook.voltabreau.ch/dashboard`
+- Server: DigitalOcean-Droplet `138.68.87.128`, Ubuntu 24.04.3 LTS
+- Anwendungspfad: `/opt/anny_webhook`
+- Datenbank: `/opt/anny_webhook/data/allocator.db`
+- Anny-Ressource: `181227` („Ping Pong Tisch“)
+- produktive Anwendungsversion: `3.0.0`
 
-```text
-e0ae5a37a183e351595a3b6c0bee571dd31071bb543c05e276cdd9c07c603f75
-```
+`app.py`, Produktions-Compose-Datei und Caddyfile auf dem Server stimmen mit den geprüften Repository-Dateien überein. Das laufende Allocator-Image trägt den Git-Commit als OCI-Revision.
 
-Diese Datei war die unveränderte Baseline des ersten Git-Commits `7d57f67`. Der Root-Audit am 1. September 2026 bestätigte denselben SHA-256 sowohl für `/opt/anny_webhook/app.py` als auch für `/app/app.py` im laufenden Container.
+## Laufzeit
 
-Das Repository entwickelt diese Baseline nun weiter. Neu implementiert, getestet und noch nicht produktiv ausgerollt sind:
+Zwei Docker-Container sind aktiv:
 
-- geschütztes Mitarbeiter-Dashboard unter `/dashboard`
-- Schutz des vollständigen `/allocations`-Exports durch dieselbe Basic Auth
-- Ampelprüfung auf offene Zuweisungen, ungültige Datensätze und Tischkollisionen
-- bedarfsabhängige Bereinigung stornierter oder bei Anny gelöschter Kapazitätsblocker
-- erneute Tischwahl direkt nach dieser Bereinigung
-- Ausschluss der eigenen bestehenden Allocation bei einer Neuberechnung
-- idempotente Verarbeitung der offiziellen Anny-`event_id`
-- echte Neuberechnung bei Änderungen an Zeitraum, Ressource oder Bedarf
-- automatische Nachverteilung älterer `unassigned`-Buchungen nach frei gewordener Kapazität
-- HTTP-503-Retry bei temporären Anny-GET-/PATCH-Fehlern
-- Serialisierung paralleler Zuweisungen im einzelnen Uvicorn-Prozess
-- separate Produktions-Compose-Datei mit Caddy, Healthcheck und Logbegrenzung
+| Container | Aufgabe | Zustand |
+| --- | --- | --- |
+| `anny_webhook-allocator-1` | Webhook, Anny-API, Tischlogik, Dashboard, SQLite | `healthy`, read-only, Restart `unless-stopped` |
+| `anny_webhook-caddy-1` | Ports 80/443, HTTPS, Reverse Proxy | aktiv |
 
-Diese Erweiterungen sind lokal getestet, aber noch nicht produktiv ausgerollt. Der laufende Server wurde während des Audits nicht verändert.
+Der Allocator-Port 8099 ist nur im Docker-Netz sichtbar. Öffentlich geöffnet sind SSH 22 sowie HTTP/HTTPS 80/443. UFW ist aktiv; automatische Ubuntu-Sicherheitsupdates sind aktiviert.
 
-## Beobachteter Produktionszustand
+Der Server besitzt 1 CPU, rund 1 GB RAM und eine 24-GB-Systemplatte. Diese Größe ist für den heutigen einzelnen Allocator ausreichend.
 
-Die öffentliche Produktionsprüfung bestätigte am 1. September 2026:
+## Zugangsdaten und Schutz
 
-- `webhook.voltabreau.ch` zeigt auf `138.68.87.128`.
-- Ein gültiges Let's-Encrypt-Zertifikat und Caddy terminieren HTTPS.
-- Uvicorn/FastAPI beantwortet `/health` erfolgreich.
-- Das vollständige damalige OpenAPI-Dokument war identisch mit der Repository-Baseline.
-- `POST /` ohne Webhook-Secret wurde korrekt mit HTTP 401 abgewiesen.
+- Der aktive Anny-Token besitzt nur `b.bookings:read` und `b.bookings:update`.
+- Der alte, überberechtigte Token `annyAPI` ist auf ausdrücklichen Wunsch noch nicht widerrufen, wird vom Server aber nicht mehr verwendet.
+- Das Webhook-Secret wurde rotiert und stimmt zwischen Anny und Server überein.
+- Uvicorn-Access-Logs sind deaktiviert, weil Anny das historische Secret noch im Query-Parameter sendet.
+- Dashboard, `/dashboard/data` und `/allocations` sind per HTTP Basic Auth geschützt.
+- Der Dashboard-Benutzername ist `planger@voltabraeu.ch`; das Passwort wird ausschließlich außerhalb von Git gespeichert.
+- Die produktive `.env` besitzt Dateimodus `0600`.
 
-Nach einer während des Audits neu eingegangenen Buchung meldete der Allocator 766 lokale Einträge:
+Der Live-Server erlaubt momentan weiterhin `root`-Login und Passwortauthentifizierung per SSH. Das ist der wichtigste noch offene technische Härtungspunkt.
 
-| Status | Anzahl |
+## Backups und Rollback
+
+Vor dem Rollout wurden erstellt:
+
+- `/opt/anny_webhook/backups/20260901T194300Z-pre-v3/`: alte Anwendung, Konfiguration, konsistentes SQLite-Backup und Rollback-Image
+- `/opt/anny_webhook/backups/20260901T195900Z-postdeploy-pre-e2e.db`: konsistente Datenbank direkt vor dem End-to-End-Test
+- `/opt/anny_webhook/backups/20260901T203752Z-pre-dashboard-credentials/.env`: Konfiguration vor Änderung des Dashboard-Logins
+
+Die geprüften SQLite-Backups meldeten `PRAGMA integrity_check = ok`. Lokale Backups auf demselben Droplet ersetzen kein Offsite- oder DigitalOcean-Droplet-Backup.
+
+## Nachgewiesene Tests
+
+### Automatisierte Suite
+
+- 32 Tests erfolgreich
+- Python-Kompilierung erfolgreich
+- Compose-Konfiguration gültig
+- isolierter Smoke-Test auf einer Kopie der Produktionsdatenbank erfolgreich
+- Dashboard mit Auth HTTP 200, ohne Auth HTTP 401
+
+### Sicherheits-Hotfix
+
+Ein erster rotierter Webhook-Key erschien wegen des Query-Parameters im Uvicorn-Access-Log. Daraufhin wurde:
+
+1. der Access-Log deaktiviert,
+2. das Secret erneut rotiert,
+3. das Image neu gebaut und der Container ersetzt,
+4. geprüft, dass weder Query-Key noch Secret im neuen Container-Log vorkommen.
+
+### Kontrollierter Vollbelegungs-/Storno-Test
+
+Ein isoliert vorbereiteter Test belegte alle acht Tische, hielt eine echte Buchung als wartend und simulierte einen offiziellen Storno-Webhook. Ergebnis:
+
+- Storno gab Kapazität frei,
+- wartende Buchung wurde automatisch zugewiesen,
+- Anny-Notizen wurden aktualisiert,
+- keine technischen Testblocker blieben zurück,
+- keine Kollision und kein retry-fähiger Fehler entstand.
+
+### Echter Gästetest
+
+Für den 27. September 2026, 09:00–10:00 Uhr:
+
+1. `BB783001256` belegte bei Vollbelegung Tisch 8.
+2. Die Buchung wurde in Anny storniert.
+3. Anny lieferte den Storno tatsächlich als `bookings.updated` mit Status `canceled`.
+4. Der Allocator entfernte die lokale Zeile mit Ergebnis `BOOKING_CANCELED_DB_CLEANED`; Tisch 8 war frei.
+5. Die unmittelbar danach erstellte Buchung `BB855734593` erhielt automatisch Tisch 8.
+6. `customer_note`, `note` und `description` waren in Anny synchron; die Bestätigungsmail enthielt „Deine Tische: Tisch 8“.
+7. Der Zeitraum war anschließend wieder kollisionsfrei 8/8 belegt.
+
+Damit ist der ursprüngliche Fehler „Storno in Anny, aber Tisch bleibt lokal blockiert“ praktisch im Live-System behoben.
+
+## Datenbankzustand nach Rollout
+
+Der Abschlussaudit meldete:
+
+| Prüfung | Ergebnis |
 | --- | ---: |
-| Zugewiesen | 710 |
-| Nicht zugewiesen | 56 |
-| Aktiv oder zukünftig | 56 |
+| SQLite-Integrität | `ok` |
+| Allocations gesamt | 766 |
+| Zugewiesen | 711 |
+| Nicht zugewiesen | 55 |
+| Tischkollisionen | 0 |
+| retry-fähige Webhook-Fehler | 0 |
 
-Für die konfigurierte Ressource `181227` wurden keine gleichzeitigen Doppelbelegungen desselben Tischlabels im geprüften Bestand gefunden.
+Die Zahlen sind eine Momentaufnahme. Historische `unassigned`-Einträge können die Dashboard-Ampel weiterhin gelb machen, obwohl die aktuelle Storno-Logik korrekt arbeitet.
 
-Der Live-Abgleich zeigte sieben Abweichungen: fünf fehlende Beschreibungsmarker und zwei fachlich veraltete Datensätze. Bei `BB457317562` hält SQLite zwei Tische bis 20:00 UTC, während Anny drei Tische bis 18:00 UTC verlangt. Bei `BB868103531` endet der lokale Datensatz eine Stunde früher als die Anny-Buchung. Das bestätigt den Fehler des alten `bookings.updated`-Schleifenschutzes.
+## Bekannter fachlicher Fehler: Anny-Kapazität gegen Tischbedarf
 
-Alle 13 aktuellen oder zukünftigen `unassigned`-Einträge existierten in Anny weiterhin mit Status `accepted` und gehörten zum Service `83985`. Die Live-API identifizierte ihn eindeutig als „Gruppen Volta Bräu 4 Tische“; er muss daher regulär vier Tische erhalten. Acht dieser 13 Fälle wären nach dem gespeicherten Belegungsbild bereits wieder zuweisbar gewesen, wurden von der alten Version aber nie erneut versucht. Die neue Nachverteilung schließt genau diese Lücke.
+Am 7. September 2026 zeigte Anny für 19:00–20:00 Uhr acht Buchungen und ließ keine weitere Gastbuchung zu. Der Allocator hatte gleichzeitig nur sechs konkrete Tische zugewiesen; eine Buchung verlangte vier Tische, fand aber nicht genügend Gesamtkapazität.
 
-Alle 42 zum Zeitpunkt des gezielten Statusabgleichs wirksamen `assigned`-Datensätze gehörten zu vorhandenen, nicht stornierten Anny-Buchungen. Es lag damit während des Audits kein aktuell bestätigter Storno-Blocker vor.
+Ursache ist kein verbliebener E2E-Blocker. Anny zählt in dieser Konstellation Buchungs-/Kapazitätseinheiten, während der Allocator das Feld `weight` als Anzahl physischer Tische interpretiert. Services mit einem und mehreren benötigten Tischen können deshalb fachlich auseinanderlaufen.
 
-Diese Zahlen sind eine Momentaufnahme und keine automatisierte, fortlaufende Kennzahl. Die beiden lokalen SQLite-Dateien auf dem Mac waren leer und sind keine Produktionskopien.
+Dieser Punkt muss separat gelöst werden, beispielsweise durch eine konsistente Kapazitätsmodellierung in Anny oder echte einzelne Tischressourcen. Bis dahin bedeutet „8/8 in Anny“ nicht in jedem gemischten Zeitraum automatisch „alle acht physischen Tischlabels sind erfolgreich zugewiesen“.
 
-## Priorisierte Baustellen
+## Priorisierte nächste Schritte
 
-### Kritisch vor dem nächsten Deployment
-
-1. Produktionsdateien und Umgebungsvariablennamen sind verglichen; vor dem Deployment trotzdem ein versioniertes Deployment-Paket und ein separates konsistentes Datenbank-Backup erstellen.
-2. Den lokal gefundenen Anny-Token als kompromittiert behandeln, widerrufen und ersetzen.
-3. Ein starkes `WEBHOOK_SECRET`, `DASHBOARD_USERNAME` und `DASHBOARD_PASSWORD` setzen. Der neue Code schließt `/allocations`; auf der noch laufenden alten Produktionsversion bleibt der Endpunkt bis zum Deployment öffentlich.
-4. Vor Migration der Datenbank ein konsistentes Backup erstellen.
-
-### Vor dem kontrollierten Rollout verifizieren
-
-1. Die implementierten Update-, PATCH-, Nachverteilungs- und Parallelitätstests in einer isolierten Kopie der Produktionsdatenbank ausführen.
-2. In Anny genau `bookings.created`, `bookings.updated` und `bookings.deleted` aktivieren; `deleted` umfasst laut offizieller Dokumentation auch Storno. Den Ressourcenfilter auf `181227` setzen.
-3. Einen kontrollierten End-to-End-Test mit Testbuchung, echter Änderung, Vollbelegung, Storno und Nachverteilung durchführen.
-4. Sicherstellen, dass Produktion weiterhin genau einen Uvicorn-Worker und einen Allocator-Container verwendet.
-5. Die gezielte Event-Reconciliation später um einen kontrollierten vollständigen Bestandsabgleich erweitern.
-
-### Mittlere Priorität
-
-1. Kunden- und interne Notizen später ebenfalls als klar abgegrenzte verwaltete Abschnitte behandeln; die `description` tut dies bereits.
-2. Query-Parameter-Authentifizierung entfernen, sobald die native Anny-Signatur technisch eindeutig dokumentiert und getestet ist.
-3. Externe Alarmierung für `unassigned`, API-Fehler und Bestandsabweichungen ergänzen. Das Dashboard macht diese Zustände bereits manuell sichtbar.
-4. Echte Anny-Sandbox-Integrations- und Migrations-Tests ergänzen. Die lokale Suite verwendet absichtlich keine echten Tokens.
+1. Nach Abschluss der Anwenderprüfung den alten Anny-Token `annyAPI` widerrufen.
+2. Automatische DigitalOcean- und verschlüsselte Offsite-Backups einrichten.
+3. Persönlichen SSH-Key und eingeschränkten Wartungsbenutzer anlegen; Root- und Passwort-Login deaktivieren.
+4. Den Anny-/Tisch-Kapazitätsunterschied fachlich korrigieren.
+5. Automatisierte Tests und Deployment vom GitHub-Commit bis zum unveränderlichen Server-Image aufbauen.
+6. Persönliche Dashboard-Anmeldung oder vorgeschalteten Identity-Provider statt gemeinsamem Basic-Auth-Passwort einführen.
+7. Periodischen vollständigen Abgleich zwischen Anny und SQLite ergänzen.
 
 ## Abgrenzung
 
-Der WhatsApp-Bot ist für diesen Arbeitsschritt ausdrücklich ausgeklammert. Seine Dateien, Zugangsdaten und Laufzeit gehören nicht in dieses Repository. Hinweise aus späteren internen Service-Katalogen wurden nur verwendet, soweit sie die fachliche Interpretation bestehender Tischzuweisungen erklären.
+Der separat gefundene WhatsApp-Bot gehört weiterhin nicht zu diesem Repository und hat keinen Einfluss auf die Tischzuweisung.

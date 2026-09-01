@@ -72,6 +72,8 @@ docker compose -f docker-compose.production.yml build
 docker compose -f docker-compose.production.yml up -d
 ```
 
+Der Stand `c261d029d8929582aa8d0628267c79003e0093be` ist seit dem 1. September 2026 produktiv unter `https://webhook.voltabreau.ch` aktiv. Das geschützte Dashboard ist unter `https://webhook.voltabreau.ch/dashboard` erreichbar. Ein Git-Push löst derzeit noch kein automatisches Deployment aus.
+
 ## Lokale Entwicklung
 
 ```bash
@@ -123,11 +125,13 @@ Die historische Abwärtskompatibilität akzeptiert das Webhook-Secret zusätzlic
 
 ## Betrieb und Weiterentwicklung
 
+- [docs/HANDBUCH.md](docs/HANDBUCH.md): laienverständlicher Gesamtüberblick und Alltagshilfe
 - [docs/OPERATIONS.md](docs/OPERATIONS.md): Bestandsaufnahme, Deployment, Backup und Rollback
 - [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md): belegter Produktionsstand und priorisierte Baustellen
+- [docs/ZUKUNFT.md](docs/ZUKUNFT.md): Bewertung von Droplet, Domain, SSH und Managed-Alternativen
 - [SECURITY.md](SECURITY.md): Secret- und Datenschutzregeln
 
-Das Repository wurde aus der zuletzt lokal gefundenen Version vom 2. März 2026 aufgebaut. Die Prüfung per Root-Zugang am 1. September 2026 bestätigte, dass Produktionsdatei und laufendes Container-Image bytegenau dieser ursprünglichen Baseline entsprechen. Dashboard, idempotente Webhook-Verarbeitung, sichere Updates und automatische Nachverteilung sind weiterhin nur im Repository entwickelt und noch nicht produktiv ausgerollt.
+Das Repository wurde aus der zuletzt lokal gefundenen Version vom 2. März 2026 aufgebaut. Nach Root-Audit, konsistenten Backups, Secret-Rotation, isolierten Smoke-Tests und einem kontrollierten Live-End-to-End-Test wurde die neue Version am 1. September 2026 produktiv ausgerollt. Storno, Freigabe und direkte Wiederbelegung desselben Tischs wurden mit echten Anny-Buchungen erfolgreich bestätigt.
 
 ## Nicht im Projektumfang
 
