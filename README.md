@@ -125,6 +125,7 @@ Die historische Abwärtskompatibilität akzeptiert das Webhook-Secret zusätzlic
 
 ## Betrieb und Weiterentwicklung
 
+- [docs/handover/README.md](docs/handover/README.md): vollständiges Technical Handover Package für Ownership, Betrieb, Recovery und Offboarding
 - [docs/HANDBUCH.md](docs/HANDBUCH.md): laienverständlicher Gesamtüberblick und Alltagshilfe
 - [docs/OPERATIONS.md](docs/OPERATIONS.md): Bestandsaufnahme, Deployment, Backup und Rollback
 - [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md): belegter Produktionsstand und priorisierte Baustellen
