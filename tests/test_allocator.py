@@ -27,6 +27,11 @@ def test_any_free_group_is_split_fallback_in_table_order():
     assert app.pick_any_free_group(3, busy) == ["Tisch 1", "Tisch 3", "Tisch 5"]
 
 
+def test_split_detection_preserves_non_contiguous_assignment_note():
+    assert app.tables_are_split(["Tisch 2", "Tisch 3"]) is False
+    assert app.tables_are_split(["Tisch 1", "Tisch 3"]) is True
+
+
 def test_overlaps_treats_touching_intervals_as_non_overlapping():
     at_1800 = datetime(2026, 9, 1, 18, 0, tzinfo=timezone.utc)
     at_1900 = datetime(2026, 9, 1, 19, 0, tzinfo=timezone.utc)
@@ -49,6 +54,16 @@ def test_desired_patch_fields_marks_split_assignment():
     assert fields["description"] == "TISCHE: Tisch 1, Tisch 3, Tisch 5 — Geburtstagsrunde"
 
 
+def test_desired_patch_fields_replaces_own_marker_but_keeps_staff_text():
+    fields = app.desired_patch_fields(
+        ["Tisch 4", "Tisch 5"],
+        "TISCHE: Tisch 1 & Tisch 2 — Geburtstagsrunde",
+        split=False,
+    )
+
+    assert fields["description"] == "TISCHE: Tisch 4 & Tisch 5 — Geburtstagsrunde"
+
+
 def test_extract_event_and_booking_id_supports_nested_payload():
     event, booking_id = app.extract_event_and_booking_id(
         {"event": "bookings.updated", "data": {"type": "bookings", "id": 4711}},
@@ -57,6 +72,17 @@ def test_extract_event_and_booking_id_supports_nested_payload():
 
     assert event == "bookings.updated"
     assert booking_id == "4711"
+
+
+def test_extract_official_anny_payload_and_event_id():
+    payload = {
+        "event": "bookings.deleted",
+        "event_id": "550e8400-e29b-41d4-a716-446655440000",
+        "data": {"type": "bookings", "id": "1764", "number": "BB533155102"},
+    }
+
+    assert app.extract_event_and_booking_id(payload, {}) == ("bookings.deleted", "1764")
+    assert app.extract_event_id(payload, {}) == "550e8400-e29b-41d4-a716-446655440000"
 
 
 def test_extract_event_uses_headers_and_defaults_event():

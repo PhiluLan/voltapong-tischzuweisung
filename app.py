@@ -7,6 +7,7 @@ import sqlite3
 import urllib.request
 import urllib.error
 import hashlib
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,8 @@ MARKER = os.environ.get("AUTO_MARKER", "TISCHE:")
 NOTE_PREFIX = os.environ.get("AUTO_PREFIX", "Auto-Allocation:")
 
 HANDLE_UPDATED = os.environ.get("HANDLE_UPDATED", "1") not in ("0", "false", "False")
+REDISTRIBUTION_LIMIT = max(1, int(os.environ.get("REDISTRIBUTION_LIMIT", "20")))
+WEBHOOK_EVENT_RETENTION_DAYS = max(1, int(os.environ.get("WEBHOOK_EVENT_RETENTION_DAYS", "90")))
 
 # Optional: restrict allocator to certain resource IDs (comma separated).
 # If empty -> applies to ALL resources.
@@ -52,7 +55,12 @@ DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "").strip()
 DASHBOARD_REFRESH_SECONDS = max(10, int(os.environ.get("DASHBOARD_REFRESH_SECONDS", "30")))
 DASHBOARD_TEMPLATE = Path(__file__).resolve().parent / "templates" / "dashboard.html"
 
-app = FastAPI(title="Volta Pong Tischzuweisung", version="2.0.0")
+app = FastAPI(title="Volta Pong Tischzuweisung", version="3.0.0")
+
+# Uvicorn runs this service with one worker. Serializing the complete
+# read/choose/write cycle prevents simultaneous webhooks from choosing the
+# same table before either allocation has reached SQLite.
+ALLOCATION_LOCK = threading.RLock()
 
 
 def dprint(*a):
@@ -137,8 +145,9 @@ def patch_booking(booking_id: str, attrs: Dict[str, Any]) -> dict:
 # DB
 # -----------------------------
 def db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
@@ -182,6 +191,20 @@ def init_db():
         # 3) indexes last
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alloc_time ON allocations(start_date, end_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alloc_resource ON allocations(resource_id)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS webhook_events (
+                event_id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                booking_id TEXT,
+                processed_at TEXT NOT NULL,
+                outcome_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_webhook_events_processed_at ON webhook_events(processed_at)"
+        )
         conn.commit()
 
 
@@ -279,6 +302,64 @@ def delete_allocation(booking_id: str):
         conn.commit()
 
 
+def get_processed_webhook_event(event_id: str) -> Optional[Dict[str, Any]]:
+    if not event_id:
+        return None
+    with db() as conn:
+        row = conn.execute(
+            "SELECT event_type, booking_id, processed_at, outcome_json FROM webhook_events WHERE event_id=?",
+            (str(event_id),),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        outcome = json.loads(row["outcome_json"] or "{}")
+    except Exception:
+        outcome = {}
+    return {
+        "event_id": str(event_id),
+        "event_type": row["event_type"],
+        "booking_id": row["booking_id"] or "",
+        "processed_at": row["processed_at"],
+        "outcome": outcome,
+    }
+
+
+def record_processed_webhook_event(
+    event_id: str,
+    event_type: str,
+    booking_id: str,
+    outcome: Dict[str, Any],
+) -> None:
+    if not event_id:
+        return
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO webhook_events (
+                event_id, event_type, booking_id, processed_at, outcome_json
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(event_id) DO UPDATE SET
+                event_type=excluded.event_type,
+                booking_id=excluded.booking_id,
+                processed_at=excluded.processed_at,
+                outcome_json=excluded.outcome_json
+            """,
+            (
+                str(event_id),
+                str(event_type),
+                str(booking_id or ""),
+                iso_now(),
+                json.dumps(outcome, ensure_ascii=False, sort_keys=True),
+            ),
+        )
+        conn.execute(
+            "DELETE FROM webhook_events WHERE julianday(processed_at) < julianday('now', ?)",
+            (f"-{WEBHOOK_EVENT_RETENTION_DAYS} days",),
+        )
+        conn.commit()
+
+
 def list_overlapping_allocations(
     window_start: datetime,
     window_end: datetime,
@@ -318,6 +399,40 @@ def list_overlapping_allocations(
                 )
             )
     return out
+
+
+def list_overlapping_unassigned_booking_ids(
+    window_start: datetime,
+    window_end: datetime,
+    resource_id: str,
+    exclude_booking_id: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> List[str]:
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT booking_id, start_date, end_date, created_at
+            FROM allocations
+            WHERE status='unassigned' AND (resource_id=? OR resource_id IS NULL OR resource_id='')
+            ORDER BY COALESCE(created_at, ''), start_date, booking_id
+            """,
+            (resource_id,),
+        ).fetchall()
+
+    booking_ids: List[str] = []
+    for row in rows:
+        if exclude_booking_id is not None and str(row["booking_id"]) == str(exclude_booking_id):
+            continue
+        try:
+            start = parse_iso(row["start_date"])
+            end = parse_iso(row["end_date"])
+        except Exception:
+            continue
+        if overlaps(start, end, window_start, window_end):
+            booking_ids.append(str(row["booking_id"]))
+        if limit is not None and len(booking_ids) >= limit:
+            break
+    return booking_ids
 
 
 # -----------------------------
@@ -372,6 +487,17 @@ def choose_group(need: int, busy: Dict[str, bool]) -> Tuple[Optional[List[str]],
     return None, "unassigned", False
 
 
+def tables_are_split(tables: List[str]) -> bool:
+    """Return whether an assigned group is non-contiguous in TABLE_LABELS order."""
+    if len(tables) < 2:
+        return False
+    try:
+        positions = [TABLES.index(table) for table in tables]
+    except ValueError:
+        return True
+    return positions != list(range(positions[0], positions[0] + len(positions)))
+
+
 def compute_need(booking_weight: Optional[int]) -> int:
     # For "single table" services weight may be missing; default is 1
     if booking_weight is not None:
@@ -384,12 +510,13 @@ def compute_need(booking_weight: Optional[int]) -> int:
     return 1
 
 
-def prefix_once(original: str, prefix: str) -> str:
-    if not original:
-        return prefix.strip()
-    if original.startswith(prefix):
-        return original
-    return prefix + original
+def managed_description(original: str, message: str) -> str:
+    """Replace only our leading description segment and preserve staff text."""
+    remainder = (original or "").strip()
+    if remainder.startswith(MARKER):
+        _managed, separator, staff_text = remainder.partition(" — ")
+        remainder = staff_text.strip() if separator else ""
+    return f"{message} — {remainder}" if remainder else message
 
 
 def desired_patch_fields(tables: List[str], current_description: str, split: bool) -> Dict[str, str]:
@@ -402,10 +529,7 @@ def desired_patch_fields(tables: List[str], current_description: str, split: boo
 
     msg = f"{MARKER} {label}".strip()
 
-    if MARKER in (current_description or ""):
-        new_desc = current_description
-    else:
-        new_desc = f"{msg} — {current_description}" if current_description else msg
+    new_desc = managed_description(current_description, msg)
 
     # Optional hint for staff when fallback used (split seating)
     note_suffix = " (Split)" if split and label else ""
@@ -431,8 +555,34 @@ def patch_if_needed(booking_id: str, current_attrs: Dict[str, Any], fields: Dict
         return {"ok": True, "skipped": True, "reason": "NO_OP_PATCH", "hash": h}
 
     res = patch_booking(str(booking_id), fields)
+    if isinstance(res, dict) and res.get("errors"):
+        return {
+            "ok": False,
+            "patched": False,
+            "retryable": True,
+            "reason": "ANNY_PATCH_FAILED",
+            "hash": h,
+            "errors": res.get("errors") or [],
+        }
     touch_patch_meta(booking_id, h)
     return {"ok": True, "patched": True, "hash": h, "response": res}
+
+
+def patch_result_or_retryable_failure(
+    result: Dict[str, Any],
+    patch_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    result["patch"] = patch_result
+    if patch_result.get("ok"):
+        return result
+    result.update(
+        {
+            "ok": False,
+            "reason": "ANNY_PATCH_FAILED",
+            "retryable": True,
+        }
+    )
+    return result
 
 
 def is_booking_canceled(attrs: Dict[str, Any]) -> Tuple[bool, str, Any]:
@@ -509,10 +659,25 @@ def cleanup_stale_overlapping_allocations(
     }
 
 
-def ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]:
+def _ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]:
+    existing = get_allocation(str(booking_id))
     bj = fetch_booking(str(booking_id))
     if "errors" in bj:
-        return {"ok": False, "reason": "FETCH_BOOKING_FAILED", "errors": bj["errors"]}
+        if response_is_not_found(bj):
+            delete_allocation(str(booking_id))
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "BOOKING_NOT_FOUND_DB_CLEANED",
+                "booking_id": str(booking_id),
+                "allocation_removed": existing is not None,
+            }
+        return {
+            "ok": False,
+            "reason": "FETCH_BOOKING_FAILED",
+            "retryable": True,
+            "errors": bj["errors"],
+        }
 
     data = bj.get("data") or {}
     attrs = data.get("attributes") or {}
@@ -525,14 +690,14 @@ def ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]
     end_date = str(attrs.get("end_date") or "")
     weight = attrs.get("weight")
     description = str(attrs.get("description") or "")
-    current_note = str(attrs.get("note") or "")
-    current_desc = str(attrs.get("description") or "")
 
     if not resource_id:
-        return {"ok": False, "reason": "NO_RESOURCE_ID"}
+        return {"ok": False, "reason": "NO_RESOURCE_ID", "retryable": True}
 
     # RESOURCE FILTER (production-safe)
     if ALLOCATE_RESOURCE_IDS and resource_id not in ALLOCATE_RESOURCE_IDS:
+        if existing:
+            delete_allocation(str(booking_id))
         dprint(f"ignore booking_id={booking_id} resource_id={resource_id} service_id={service_id}")
         return {
             "ok": True,
@@ -540,6 +705,7 @@ def ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]
             "booking_id": str(booking_id),
             "resource_id": resource_id,
             "service_id": service_id,
+            "allocation_removed": existing is not None,
         }
 
     # --- NEW: Cancellation cleanup ---
@@ -560,24 +726,14 @@ def ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]
     # -------------------------------
 
     if not start_date or not end_date:
-        return {"ok": False, "reason": "MISSING_DATES"}
+        return {"ok": False, "reason": "MISSING_DATES", "retryable": True}
 
     need = compute_need(weight)
-    window_start = parse_iso(start_date)
-    window_end = parse_iso(end_date)
-
-    existing = get_allocation(str(booking_id))
-
-    # Prevent infinite loops: if updated and booking already contains our marker/note, skip.
-    looks_ours = (MARKER in current_desc) or current_note.startswith(NOTE_PREFIX)
-    if event == "bookings.updated" and existing and looks_ours:
-        return {
-            "ok": True,
-            "skipped": True,
-            "reason": "UPDATED_EVENT_LOOKS_OURS",
-            "booking_id": str(booking_id),
-            "tables": existing.tables,
-        }
+    try:
+        window_start = parse_iso(start_date)
+        window_end = parse_iso(end_date)
+    except Exception:
+        return {"ok": False, "reason": "INVALID_DATES", "retryable": True}
 
     # Reuse allocation if unchanged
     if existing and existing.status == "assigned":
@@ -588,9 +744,13 @@ def ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]
             ex_s, ex_e = window_start, window_end
 
         if ex_s == window_start and ex_e == window_end and existing.need == need and existing.tables:
-            fields = desired_patch_fields(existing.tables, description, split=False)
+            fields = desired_patch_fields(
+                existing.tables,
+                description,
+                split=tables_are_split(existing.tables),
+            )
             patch_res = patch_if_needed(str(booking_id), attrs, fields)
-            return {
+            return patch_result_or_retryable_failure({
                 "ok": True,
                 "booking_id": str(booking_id),
                 "booking_number": booking_number,
@@ -599,9 +759,8 @@ def ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]
                 "need": need,
                 "tables": existing.tables,
                 "reused": True,
-                "patch": patch_res,
                 "mode": "reused",
-            }
+            }, patch_res)
 
     # Build busy map from OUR allocations. Never let an older allocation for
     # the same booking block its own reallocation.
@@ -644,11 +803,6 @@ def ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]
     # 3) if still none -> truly not enough free tables
     if not group:
         warn = f"{MARKER} Keine freien {need} Tische verfügbar (bitte manuell zuweisen)."
-        patch_res = patch_if_needed(
-            str(booking_id),
-            attrs,
-            {"customer_note": warn, "note": warn, "description": prefix_once(description, warn + " — ")},
-        )
         upsert_allocation(
             Allocation(
                 booking_id=str(booking_id),
@@ -660,13 +814,22 @@ def ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]
                 need=need,
                 tables=[],
                 status="unassigned",
-                last_patch_hash=patch_res.get("hash", ""),
-                patched_at=iso_now(),
             )
         )
-        return {
+        patch_res = patch_if_needed(
+            str(booking_id),
+            attrs,
+            {
+                "customer_note": warn,
+                "note": warn,
+                "description": managed_description(description, warn),
+            },
+        )
+        return patch_result_or_retryable_failure({
             "ok": False,
             "reason": "NOT_ENOUGH_FREE_TABLES",
+            "capacity_reason": "NOT_ENOUGH_FREE_TABLES",
+            "retryable": False,
             "booking_id": str(booking_id),
             "booking_number": booking_number,
             "resource_id": resource_id,
@@ -674,8 +837,7 @@ def ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]
             "need": need,
             "busy": busy,
             "reconciliation": reconciliation,
-            "patch": patch_res,
-        }
+        }, patch_res)
 
     # Persist allocation
     upsert_allocation(
@@ -695,7 +857,7 @@ def ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]
     fields = desired_patch_fields(group, description, split=split)
     patch_res = patch_if_needed(str(booking_id), attrs, fields)
 
-    return {
+    result = patch_result_or_retryable_failure({
         "ok": True,
         "booking_id": str(booking_id),
         "booking_number": booking_number,
@@ -703,10 +865,191 @@ def ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]
         "service_id": service_id,
         "need": need,
         "tables": group,
-        "patch": patch_res,
         "mode": mode,
         "reconciliation": reconciliation,
+    }, patch_res)
+    if not patch_res.get("ok") and (not existing or existing.status != "assigned"):
+        # A brand-new/retried allocation is not acknowledged until Anny also
+        # contains the table note. Keeping it unassigned lets the same event or
+        # a pending redistribution retry safely without blocking the table.
+        upsert_allocation(
+            Allocation(
+                booking_id=str(booking_id),
+                booking_number=booking_number,
+                resource_id=resource_id,
+                service_id=service_id,
+                start_date=start_date,
+                end_date=end_date,
+                need=need,
+                tables=[],
+                status="unassigned",
+            )
+        )
+        result["allocation_rolled_back"] = True
+    return result
+
+
+def ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]:
+    with ALLOCATION_LOCK:
+        return _ensure_allocation_for_booking(booking_id, event)
+
+
+def allocation_released_capacity(before: Optional[Allocation], after: Optional[Allocation]) -> bool:
+    if not before or before.status != "assigned" or not before.tables:
+        return False
+    if not after or after.status != "assigned" or not after.tables:
+        return True
+    return (
+        before.resource_id != after.resource_id
+        or before.start_date != after.start_date
+        or before.end_date != after.end_date
+        or before.need != after.need
+        or before.tables != after.tables
+    )
+
+
+def redistribute_unassigned(
+    window_start: datetime,
+    window_end: datetime,
+    resource_id: str,
+    exclude_booking_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    candidate_ids = list_overlapping_unassigned_booking_ids(
+        window_start,
+        window_end,
+        resource_id=resource_id,
+        exclude_booking_id=exclude_booking_id,
+        limit=REDISTRIBUTION_LIMIT,
+    )
+    summary: Dict[str, Any] = {
+        "attempted": bool(candidate_ids),
+        "checked": 0,
+        "assigned": [],
+        "still_unassigned": [],
+        "removed": [],
+        "errors": [],
+        "limit": REDISTRIBUTION_LIMIT,
     }
+
+    for candidate_id in candidate_ids:
+        summary["checked"] += 1
+        result = _ensure_allocation_for_booking(candidate_id, event="internal.redistribution")
+        current = get_allocation(candidate_id)
+        booking_number = str(result.get("booking_number") or (current.booking_number if current else ""))
+        if result.get("retryable"):
+            summary["errors"].append(
+                {
+                    "booking_number": booking_number,
+                    "reason": str(result.get("reason") or "UNKNOWN_ERROR"),
+                }
+            )
+        if current is None:
+            summary["removed"].append(booking_number or candidate_id)
+        elif current.status == "assigned" and current.tables:
+            summary["assigned"].append(
+                {
+                    "booking_number": current.booking_number,
+                    "tables": current.tables,
+                }
+            )
+        else:
+            summary["still_unassigned"].append(current.booking_number or candidate_id)
+        if result.get("retryable"):
+            # Avoid multiplying an Anny outage by every waiting booking. The
+            # failed item remains visible in the dashboard and can be retried
+            # by the documented webhook delivery retry.
+            break
+
+    summary["assigned_count"] = len(summary["assigned"])
+    summary["still_unassigned_count"] = len(summary["still_unassigned"])
+    summary["removed_count"] = len(summary["removed"])
+    summary["error_count"] = len(summary["errors"])
+    return summary
+
+
+def process_booking_event(
+    event: str,
+    booking_id: str,
+    retry_windows: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Apply one Anny booking event and redistribute only released capacity."""
+    with ALLOCATION_LOCK:
+        before = get_allocation(booking_id)
+
+        if event == "bookings.deleted":
+            delete_allocation(booking_id)
+            result: Dict[str, Any] = {
+                "ok": True,
+                "event": event,
+                "booking_id": booking_id,
+                "deleted": before is not None,
+            }
+        else:
+            result = _ensure_allocation_for_booking(booking_id, event=event)
+            result["event"] = event
+
+        after = get_allocation(booking_id)
+        windows: List[Tuple[datetime, datetime, str]] = []
+
+        if allocation_released_capacity(before, after):
+            try:
+                windows.append((parse_iso(before.start_date), parse_iso(before.end_date), before.resource_id))
+            except Exception:
+                pass
+
+        reconciliation = result.get("reconciliation") or {}
+        if reconciliation.get("removed_count") and after:
+            try:
+                windows.append((parse_iso(after.start_date), parse_iso(after.end_date), after.resource_id))
+            except Exception:
+                pass
+
+        for retry_window in retry_windows or []:
+            if not retry_window.get("error_count"):
+                continue
+            try:
+                windows.append(
+                    (
+                        parse_iso(str(retry_window["window_start"])),
+                        parse_iso(str(retry_window["window_end"])),
+                        str(retry_window["resource_id"]),
+                    )
+                )
+            except Exception:
+                continue
+
+        seen_windows = set()
+        redistributions: List[Dict[str, Any]] = []
+        for window_start, window_end, resource_id in windows:
+            key = (window_start.isoformat(), window_end.isoformat(), resource_id)
+            if not resource_id or key in seen_windows:
+                continue
+            seen_windows.add(key)
+            summary = redistribute_unassigned(
+                window_start,
+                window_end,
+                resource_id=resource_id,
+                exclude_booking_id=booking_id,
+            )
+            summary.update(
+                {
+                    "resource_id": resource_id,
+                    "window_start": window_start.isoformat(),
+                    "window_end": window_end.isoformat(),
+                }
+            )
+            redistributions.append(summary)
+
+        result["redistribution"] = {
+            "triggered": bool(redistributions),
+            "windows": redistributions,
+            "assigned_count": sum(item["assigned_count"] for item in redistributions),
+            "error_count": sum(item["error_count"] for item in redistributions),
+        }
+        if result["redistribution"]["error_count"]:
+            result["retryable"] = True
+            result["retry_reason"] = "REDISTRIBUTION_FAILED"
+        return result
 
 
 # -----------------------------
@@ -745,6 +1088,12 @@ def extract_event_and_booking_id(payload: Any, headers_lower: Dict[str, str]) ->
     return event, booking_id
 
 
+def extract_event_id(payload: Any, headers_lower: Dict[str, str]) -> str:
+    if isinstance(payload, dict) and payload.get("event_id"):
+        return str(payload.get("event_id")).strip()
+    return str(headers_lower.get("x-anny-event-id") or "").strip()
+
+
 async def read_payload(req: Request) -> Any:
     try:
         return await req.json()
@@ -762,10 +1111,10 @@ def check_webhook_auth(req: Request) -> Optional[JSONResponse]:
     if not WEBHOOK_SECRET:
         return None
     got = req.headers.get("X-Webhook-Secret", "")
-    if got == WEBHOOK_SECRET:
+    if secrets.compare_digest(got, WEBHOOK_SECRET):
         return None
     key = req.query_params.get("key", "")
-    if key == WEBHOOK_SECRET:
+    if secrets.compare_digest(key, WEBHOOK_SECRET):
         return None
     return JSONResponse({"ok": False, "reason": "UNAUTHORIZED"}, status_code=401)
 
@@ -825,6 +1174,44 @@ def normalized_datetime(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def webhook_activity_snapshot() -> Dict[str, Any]:
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT event_type, processed_at, outcome_json
+            FROM webhook_events
+            WHERE julianday(processed_at) >= julianday('now', '-1 day')
+            ORDER BY processed_at DESC
+            LIMIT 200
+            """
+        ).fetchall()
+
+    retryable_failures = 0
+    redistributed = 0
+    last_outcome: Dict[str, Any] = {}
+    for index, row in enumerate(rows):
+        try:
+            outcome = json.loads(row["outcome_json"] or "{}")
+        except Exception:
+            outcome = {}
+        if index == 0:
+            last_outcome = outcome
+        if outcome.get("retryable"):
+            retryable_failures += 1
+        redistributed += int((outcome.get("redistribution") or {}).get("assigned_count") or 0)
+
+    last = rows[0] if rows else None
+    return {
+        "events_24h": len(rows),
+        "retryable_failures_24h": retryable_failures,
+        "redistributed_24h": redistributed,
+        "last_event": str(last["event_type"] or "") if last else "",
+        "last_event_at": str(last["processed_at"] or "") if last else "",
+        "last_result": str(last_outcome.get("reason") or "OK") if last else "",
+        "last_ok": bool(last) and not bool(last_outcome.get("retryable")),
+    }
+
+
 def dashboard_snapshot(now: Optional[datetime] = None) -> Dict[str, Any]:
     current_time = now or datetime.now(timezone.utc)
     if current_time.tzinfo is None:
@@ -833,6 +1220,7 @@ def dashboard_snapshot(now: Optional[datetime] = None) -> Dict[str, Any]:
         current_time = current_time.astimezone(timezone.utc)
 
     raw_rows = list_allocation_rows()
+    webhook_activity = webhook_activity_snapshot()
     parsed_rows: List[Dict[str, Any]] = []
     invalid_rows: List[Dict[str, str]] = []
 
@@ -923,6 +1311,9 @@ def dashboard_snapshot(now: Optional[datetime] = None) -> Dict[str, Any]:
     if collisions:
         status = "error"
         status_message = "Tischkollision erkannt – bitte sofort prüfen."
+    elif webhook_activity["retryable_failures_24h"]:
+        status = "warning"
+        status_message = "Mindestens ein Anny-Webhook benötigt einen erneuten Zustellversuch."
     elif future_unassigned or invalid_rows:
         status = "warning"
         status_message = "Es gibt offene Zuweisungen oder fehlerhafte Datensätze."
@@ -968,8 +1359,12 @@ def dashboard_snapshot(now: Optional[datetime] = None) -> Dict[str, Any]:
             "future_unassigned": len(future_unassigned),
             "collisions": len(collisions),
             "invalid_rows": len(invalid_rows),
+            "webhook_events_24h": webhook_activity["events_24h"],
+            "webhook_failures_24h": webhook_activity["retryable_failures_24h"],
+            "redistributed_24h": webhook_activity["redistributed_24h"],
             "last_update": newest_update,
         },
+        "webhook": webhook_activity,
         "resources": resource_summaries,
         "current": current_public,
         "upcoming": upcoming_public,
@@ -977,12 +1372,16 @@ def dashboard_snapshot(now: Optional[datetime] = None) -> Dict[str, Any]:
             "unassigned": [item["public"] for item in future_unassigned[:20]],
             "collisions": collisions[:20],
             "invalid_rows": invalid_rows[:20],
+            "webhook_failures": webhook_activity["retryable_failures_24h"],
         },
         "configuration": {
             "tables": TABLES,
             "resource_ids": configured_resources,
             "handle_updated": HANDLE_UPDATED,
             "capacity_reconciliation": True,
+            "automatic_redistribution": True,
+            "event_id_idempotency": True,
+            "redistribution_limit": REDISTRIBUTION_LIMIT,
         },
     }
 
@@ -992,7 +1391,21 @@ def dashboard_snapshot(now: Optional[datetime] = None) -> Dict[str, Any]:
 # -----------------------------
 @app.get("/health")
 def health():
-    return {"ok": True, "ts": iso_now()}
+    try:
+        with db() as conn:
+            conn.execute("SELECT 1").fetchone()
+    except Exception:
+        return JSONResponse(
+            {"ok": False, "database": False, "ts": iso_now()},
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+    return {
+        "ok": True,
+        "database": True,
+        "version": app.version,
+        "ts": iso_now(),
+    }
 
 
 @app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
@@ -1026,29 +1439,52 @@ async def webhook_root(req: Request):
     payload = await read_payload(req)
     headers_lower = {k.lower(): v for k, v in req.headers.items()}
     event, booking_id = extract_event_and_booking_id(payload, headers_lower)
+    event_id = extract_event_id(payload, headers_lower)
 
     if not booking_id:
         return JSONResponse({"ok": False, "reason": "NO_BOOKING_ID", "event": event}, status_code=200)
 
-    if event == "bookings.deleted":
-        delete_allocation(booking_id)
-        return {"ok": True, "event": event, "booking_id": booking_id, "deleted": True}
+    with ALLOCATION_LOCK:
+        previous = get_processed_webhook_event(event_id)
+        if previous and not previous["outcome"].get("retryable"):
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "duplicate": True,
+                    "event": event,
+                    "event_id": event_id,
+                    "booking_id": booking_id,
+                    "processed_at": previous["processed_at"],
+                },
+                status_code=200,
+            )
 
-    if event == "bookings.updated" and not HANDLE_UPDATED:
-        return {
-            "ok": True,
-            "event": event,
-            "booking_id": booking_id,
-            "ignored_event": True,
-            "reason": "HANDLE_UPDATED=0",
-        }
+        if event == "bookings.updated" and not HANDLE_UPDATED:
+            result: Dict[str, Any] = {
+                "ok": True,
+                "event": event,
+                "booking_id": booking_id,
+                "ignored_event": True,
+                "reason": "HANDLE_UPDATED=0",
+            }
+        elif event in ("bookings.created", "bookings.updated", "bookings.deleted"):
+            retry_windows = []
+            if previous and previous["outcome"].get("retryable"):
+                retry_windows = (previous["outcome"].get("redistribution") or {}).get("windows") or []
+            result = process_booking_event(event, booking_id, retry_windows=retry_windows)
+        else:
+            result = {
+                "ok": True,
+                "event": event,
+                "booking_id": booking_id,
+                "ignored_event": True,
+            }
 
-    if event in ("bookings.created", "bookings.updated"):
-        result = ensure_allocation_for_booking(booking_id, event=event)
-        result["event"] = event
-        return JSONResponse(result, status_code=200)
-
-    return {"ok": True, "event": event, "booking_id": booking_id, "ignored_event": True}
+        result["event_id"] = event_id
+        retryable = bool(result.get("retryable"))
+        if event_id:
+            record_processed_webhook_event(event_id, event, booking_id, result)
+        return JSONResponse(result, status_code=503 if retryable else 200)
 
 
 @app.get("/allocations")

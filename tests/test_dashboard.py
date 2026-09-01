@@ -103,3 +103,18 @@ def test_dashboard_detects_table_collision():
     assert data["status"] == "error"
     assert data["summary"]["collisions"] == 1
     assert data["issues"]["collisions"][0]["tables"] == ["Tisch 3"]
+
+
+def test_dashboard_reports_retryable_webhook_failure():
+    app.record_processed_webhook_event(
+        "event-failed",
+        "bookings.updated",
+        "booking-1",
+        {"ok": False, "reason": "FETCH_BOOKING_FAILED", "retryable": True},
+    )
+
+    data = client.get("/dashboard/data", auth=AUTH).json()
+
+    assert data["status"] == "warning"
+    assert data["summary"]["webhook_failures_24h"] == 1
+    assert data["webhook"]["last_event"] == "bookings.updated"

@@ -16,7 +16,7 @@ Bei der lokalen Bestandsaufnahme wurde ein zuvor kopierter echter Anny-Token in 
 
 1. Anny-Token und Webhook-Secret rotieren.
 2. Den neuen Basic-Auth-Schutz für `/dashboard`, `/dashboard/data` und `/allocations` mit eigenständigen, langen Zugangsdaten produktiv konfigurieren. Bis zum Deployment bleibt `/allocations` auf der alten Produktionsversion öffentlich.
-3. Das Webhook-Secret ausschließlich im Header `X-Webhook-Secret` übertragen; die Query-Parameter-Kompatibilität anschließend entfernen.
+3. Anny bietet optional einen `Signature`-Header an, dokumentiert öffentlich aber keinen Signaturalgorithmus. Bis die Prüfung mit Anny geklärt und getestet ist, das bestehende starke Webhook-Secret beibehalten. Die Query-Parameter-Kompatibilität erst danach entfernen.
 4. Service und Reverse Proxy mit minimalen Rechten betreiben und Datenbank-Backups verschlüsseln.
 5. Keine vollständigen Webhook-Payloads oder API-Header protokollieren.
 

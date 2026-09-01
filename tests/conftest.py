@@ -23,5 +23,6 @@ def clean_allocations():
 
     with app.db() as connection:
         connection.execute("DELETE FROM allocations")
+        connection.execute("DELETE FROM webhook_events")
         connection.commit()
     yield

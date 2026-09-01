@@ -22,15 +22,18 @@ SQLite-Belegungen <------ freie Tische berechnen
                          Anny-Buchung ergänzen
 ```
 
-Der aktuelle Algorithmus arbeitet so:
+Der aktuelle Entwicklungsstand arbeitet so:
 
-1. Nur konfigurierte Anny-Ressourcen werden berücksichtigt.
-2. Der Buchungswert `weight` bestimmt die Anzahl benötigter Tische; fehlt oder passt er nicht, gilt `1`.
-3. Überschneidende, bereits zugewiesene Buchungen derselben Ressource markieren Tische als belegt.
-4. Der Dienst wählt zuerst eine zusammenhängende Tischgruppe, danach beliebige freie Tische.
-5. Erscheint die Kapazität lokal voll, werden die blockierenden Buchungen nochmals bei Anny geprüft. Bestätigte Stornos und gelöschte Buchungen werden aus SQLite entfernt und die Tischwahl wird sofort wiederholt.
-6. Reichen die freien Tische danach weiterhin nicht, wird die Buchung als `unassigned` gespeichert und in Anny entsprechend markiert.
-7. Die Zuweisung wird in `customer_note`, `note` und `description` der Anny-Buchung geschrieben.
+1. Die Anny-`event_id` verhindert doppelte Verarbeitung wiederholter Zustellungen.
+2. Nur konfigurierte Anny-Ressourcen werden berücksichtigt.
+3. Der Buchungswert `weight` bestimmt die Anzahl benötigter Tische; fehlt oder passt er nicht, gilt `1`.
+4. Überschneidende, bereits zugewiesene Buchungen derselben Ressource markieren Tische als belegt.
+5. Der Dienst wählt zuerst eine zusammenhängende Tischgruppe, danach beliebige freie Tische.
+6. Erscheint die Kapazität lokal voll, werden die Blocker nochmals bei Anny geprüft. Bestätigte Stornos und gelöschte Buchungen werden entfernt und die Tischwahl wird wiederholt.
+7. Bei `bookings.deleted`, Storno oder einer kapazitätsrelevanten Änderung wird der alte Zeitraum freigegeben. Passende `unassigned`-Buchungen werden anschließend geordnet erneut versucht.
+8. Echte Änderungen an Zeitraum, Ressource oder `weight` werden auch dann verarbeitet, wenn die Buchung bereits die eigene Tischmarkierung enthält.
+9. Temporäre Anny-GET- oder PATCH-Fehler liefern HTTP 503. Anny kann dasselbe Ereignis anschließend sicher erneut zustellen.
+10. Die Zuweisung wird in `customer_note`, `note` und einem verwalteten Abschnitt der `description` geschrieben.
 
 Eine detaillierte Beschreibung steht in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Der rekonstruierte Ist-Zustand und alle bekannten Risiken stehen in [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md).
 
@@ -48,6 +51,26 @@ curl http://127.0.0.1:8099/health
 Persistente Laufzeitdaten landen unter `./data/` und werden nicht versioniert.
 
 Das geschützte Mitarbeiter-Dashboard ist danach unter `http://127.0.0.1:8099/dashboard` erreichbar. Der Browser fragt nach `DASHBOARD_USERNAME` und `DASHBOARD_PASSWORD` aus der lokalen `.env`.
+
+## Anny-Webhook konfigurieren
+
+Für die Tischzuweisung werden genau diese offiziellen Buchungsereignisse benötigt:
+
+- `bookings.created`: neue Buchung zuweisen
+- `bookings.updated`: echte Änderungen oder einen Storno-Status verarbeiten
+- `bookings.deleted`: gelöschte **oder stornierte** Buchung entfernen und Kapazität nachverteilen
+
+In Anny sollte der Webhook auf die produktive Ping-Pong-Ressource `181227` beschränkt werden. Ereignisse wie `bookings.started`, `bookings.ended`, `bookings.checked-in` und `bookings.checked-out` werden für die Tischwahl nicht benötigt. Die offizielle Payload enthält `event_id`; fehlgeschlagene Zustellungen werden von Anny erneut versucht.
+
+## Produktion
+
+`docker-compose.production.yml` bildet die verifizierte Live-Topologie mit Caddy, internem Allocator-Port, Healthcheck und begrenzten Docker-Logs ab. Es darf erst nach Backup, Secret-Rotation und kontrolliertem Test verwendet werden:
+
+```bash
+docker compose -f docker-compose.production.yml config --quiet
+docker compose -f docker-compose.production.yml build
+docker compose -f docker-compose.production.yml up -d
+```
 
 ## Lokale Entwicklung
 
@@ -86,6 +109,8 @@ Dashboard, Statusdaten und `/allocations` sind über HTTP Basic Auth geschützt 
 | `ALLOCATE_RESOURCE_IDS` | erlaubte Ressourcen, kommasepariert | Produktion: `181227` |
 | `TABLE_LABELS` | geordnete Tischliste | `Tisch 1` bis `Tisch 8` |
 | `HANDLE_UPDATED` | Update-Ereignisse verarbeiten | `1` |
+| `REDISTRIBUTION_LIMIT` | Maximal pro freiem Zeitfenster erneut geprüfte offene Buchungen | `20` |
+| `WEBHOOK_EVENT_RETENTION_DAYS` | Aufbewahrung verarbeiteter `event_id`-Einträge | `90` |
 | `AUTO_MARKER` | Marker im Beschreibungstext | `TISCHE:` |
 | `AUTO_PREFIX` | Präfix der internen Notiz | `Auto-Allocation:` |
 | `WEBHOOK_SECRET` | Secret für Header `X-Webhook-Secret` | erforderlich für Produktion |
@@ -102,7 +127,7 @@ Die historische Abwärtskompatibilität akzeptiert das Webhook-Secret zusätzlic
 - [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md): belegter Produktionsstand und priorisierte Baustellen
 - [SECURITY.md](SECURITY.md): Secret- und Datenschutzregeln
 
-Das Repository wurde aus der zuletzt lokal gefundenen Version vom 2. März 2026 aufgebaut und wird seitdem als Entwicklungsbasis weitergeführt. Die Produktionsinstanz zeigt dieselben ursprünglichen Routen und ein identisches ursprüngliches OpenAPI-Dokument; ein bytegenauer Dateivergleich mit `/opt/anny_webhook/app.py` ist ohne Root-Zugang weiterhin offen. Dashboard und Kapazitäts-Selbstheilung sind noch nicht produktiv ausgerollt.
+Das Repository wurde aus der zuletzt lokal gefundenen Version vom 2. März 2026 aufgebaut. Die Prüfung per Root-Zugang am 1. September 2026 bestätigte, dass Produktionsdatei und laufendes Container-Image bytegenau dieser ursprünglichen Baseline entsprechen. Dashboard, idempotente Webhook-Verarbeitung, sichere Updates und automatische Nachverteilung sind weiterhin nur im Repository entwickelt und noch nicht produktiv ausgerollt.
 
 ## Nicht im Projektumfang
 

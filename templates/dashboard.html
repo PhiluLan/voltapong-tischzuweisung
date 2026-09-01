@@ -432,6 +432,22 @@
         <section class="card">
           <div class="card-head">
             <div>
+              <h2>Anny-Verbindung</h2>
+              <p>Webhook-Eingänge und automatische Nachverteilung.</p>
+            </div>
+          </div>
+          <div class="resource-body">
+            <div class="resource-label"><span>Letztes Ereignis</span><strong id="last-webhook-event">–</strong></div>
+            <div class="resource-label"><span>Zuletzt empfangen</span><strong id="last-webhook-at">–</strong></div>
+            <div class="resource-label"><span>Ereignisse in 24 Stunden</span><strong id="webhook-count">0</strong></div>
+            <div class="resource-label"><span>Automatisch nachverteilt</span><strong id="redistributed-count">0</strong></div>
+            <div class="resource-label"><span>Offene Zustellfehler</span><strong id="webhook-failure-count">0</strong></div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <div>
               <h2>Was braucht Aufmerksamkeit?</h2>
               <p>Hier erscheinen nur konkrete Probleme.</p>
             </div>
@@ -447,7 +463,7 @@
           <div class="card-head">
             <div>
               <h2>So funktioniert die Zuweisung</h2>
-              <p>Der Ablauf in vier einfachen Schritten.</p>
+              <p>Der Ablauf in fünf einfachen Schritten.</p>
             </div>
           </div>
           <div class="explain-body">
@@ -456,6 +472,7 @@
               <div class="flow-step"><strong>Der Allocator wird informiert</strong><span>Der Webhook lädt die aktuelle Buchung sicher aus Anny.</span></div>
               <div class="flow-step"><strong>Freie Tische werden gewählt</strong><span>Zuerst zusammenhängend, sonst verteilt. Bei „voll“ werden alte Stornos nochmals geprüft.</span></div>
               <div class="flow-step"><strong>Anny erhält die Tischnummern</strong><span>Gast und Team sehen die konkrete Zuweisung in der Buchung.</span></div>
+              <div class="flow-step"><strong>Freie Plätze werden nachverteilt</strong><span>Nach Storno oder echter Änderung versucht das System ältere offene Zuweisungen automatisch erneut.</span></div>
             </div>
             <div class="legend">
               <div class="legend-row"><span class="legend-dot"></span><span><strong>Grün:</strong> keine Konflikte oder offenen Fälle.</span></div>
@@ -576,6 +593,9 @@
       (issues.invalid_rows || []).forEach((row) => {
         addIssue(target, `Fehlerhafter Datensatz ${row.booking_number}`, row.reason);
       });
+      if (issues.webhook_failures) {
+        addIssue(target, "Anny-Zustellung fehlgeschlagen", `${issues.webhook_failures} Ereignis${issues.webhook_failures === 1 ? " benötigt" : "se benötigen"} einen erneuten Versuch.`);
+      }
       const count = target.children.length;
       setText("issue-count", count);
       document.getElementById("issues-empty").hidden = count > 0;
@@ -598,6 +618,16 @@
       setText("collision-count", data.summary.collisions);
       setText("current-count", data.current.length);
       setText("upcoming-count", data.upcoming.length);
+      const eventLabels = {
+        "bookings.created": "Neue Buchung",
+        "bookings.updated": "Buchung geändert",
+        "bookings.deleted": "Storno oder Löschung"
+      };
+      setText("last-webhook-event", eventLabels[data.webhook.last_event] || data.webhook.last_event || "Noch kein Ereignis");
+      setText("last-webhook-at", formatDate(data.webhook.last_event_at));
+      setText("webhook-count", data.webhook.events_24h);
+      setText("redistributed-count", data.webhook.redistributed_24h);
+      setText("webhook-failure-count", data.webhook.retryable_failures_24h);
       renderBookings("current-body", "current-empty", data.current, "current");
       renderBookings("upcoming-body", "upcoming-empty", data.upcoming, "upcoming");
       renderTableMap(data.resources[0], data.configuration.tables);

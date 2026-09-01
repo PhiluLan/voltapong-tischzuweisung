@@ -13,7 +13,7 @@ Zu sichern beziehungsweise zu erfassen sind mindestens:
 - Containername, Image, Ports, Volumes und Restart-Policy
 - konsistentes Backup von `allocator.db`
 
-Erst wenn der Vergleich zeigt, welche Version produktiv ist, darf der Git-Stand als Deployment-Quelle übernommen werden.
+Der Root-Audit vom 1. September 2026 hat diese Punkte bis auf ein konsistentes Datenbank-Backup abgeschlossen. Live-Code und Container entsprechen der Baseline `7d57f67`; `/opt/anny_webhook/docker-compose.yml` und `Caddyfile` wurden mit `docker-compose.production.yml` beziehungsweise `Caddyfile` im Repository abgebildet.
 
 ## Lokal prüfen
 
@@ -23,8 +23,9 @@ cp .env.example .env
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
-pytest
+python -m pytest
 docker compose config --quiet
+docker compose -f docker-compose.production.yml config --quiet
 docker compose build
 ```
 
@@ -56,12 +57,25 @@ Nach abgeschlossenem Vergleich:
 2. Produktions-`.env` aus dem Secret Store beziehungsweise direkt auf dem Host bereitstellen.
    Zwingend neu setzen: `ANNY_TOKEN`, `WEBHOOK_SECRET`, `DASHBOARD_USERNAME` und `DASHBOARD_PASSWORD`.
 3. Bestehende Datenbank als Volume einbinden.
-4. Container bauen und starten.
-5. Intern `/health` prüfen, dann einen kontrollierten Test-Webhook verwenden.
-6. `https://webhook.voltabreau.ch/dashboard` im Browser öffnen und Grün-/Gelb-/Rot-Anzeige sowie Basic Auth prüfen.
-7. `/allocations` ohne Zugangsdaten muss HTTP 401 liefern; mit Dashboard-Zugang darf der Endpunkt funktionieren.
-8. Logs und Anny-Buchung des kontrollierten Tests prüfen.
-9. Einen Storno-Test durchführen: acht zeitgleiche Tischzuweisungen simulieren beziehungsweise in einer sicheren Testzeit verwenden, eine blockierende Buchung stornieren und danach prüfen, dass die nächste Buchung den freigewordenen Tisch erhält.
+4. `docker-compose.production.yml` verwenden; die lokale `docker-compose.yml` ist nicht die Produktionsdefinition.
+5. Container bauen und starten.
+6. Intern `/health` prüfen, dann einen kontrollierten Test-Webhook verwenden.
+7. `https://webhook.voltabreau.ch/dashboard` im Browser öffnen und Grün-/Gelb-/Rot-Anzeige sowie Basic Auth prüfen.
+8. `/allocations` ohne Zugangsdaten muss HTTP 401 liefern; mit Dashboard-Zugang darf der Endpunkt funktionieren.
+9. Logs, Dashboard und Anny-Buchung des kontrollierten Tests prüfen.
+10. Einen End-to-End-Test durchführen: Vollbelegung herstellen, eine weitere Buchung als `unassigned` erzeugen, eine blockierende Buchung stornieren und prüfen, dass die ältere offene Buchung automatisch den freigewordenen Tisch erhält.
+11. Eine zugewiesene Testbuchung bei vorhandener `TISCHE:`-Markierung in Zeitraum und `weight` ändern und prüfen, dass SQLite und Anny die neuen Werte und Tische enthalten.
+
+## Anny-Webhook-Einstellungen
+
+Im Anny-Adminbereich unter Account Settings → API muss genau ein aktiver Webhook für diese Integration bestehen:
+
+- URL: produktiver HTTPS-Endpunkt mit aktuellem Secret
+- Ereignisse: `bookings.created`, `bookings.updated`, `bookings.deleted`
+- Einschränkung: Ressource `181227`
+- nicht benötigt: `started`, `ended`, `checked-in`, `checked-out`
+
+`bookings.deleted` umfasst laut offizieller Anny-Dokumentation auch Stornierungen. Nach dem Deployment die Call History auf HTTP 2xx prüfen. HTTP 503 ist nur bei temporären Anny-API- oder Rückschreibefehlern vorgesehen und löst die dokumentierten Wiederholungen aus. Doppelte Zustellungen derselben `event_id` werden ohne erneute Zuweisung mit HTTP 200 bestätigt.
 
 Ein Deployment darf nicht stillschweigend eine leere Datenbank anlegen, wenn die bestehende Produktionsdatenbank erwartet wird.
 

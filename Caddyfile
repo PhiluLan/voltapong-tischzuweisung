@@ -1,0 +1,3 @@
+webhook.voltabreau.ch {
+  reverse_proxy allocator:8099
+}
