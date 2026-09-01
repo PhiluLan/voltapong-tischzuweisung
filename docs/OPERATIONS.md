@@ -77,6 +77,8 @@ Im Anny-Adminbereich unter Account Settings → API muss genau ein aktiver Webho
 
 `bookings.deleted` umfasst laut offizieller Anny-Dokumentation auch Stornierungen. Nach dem Deployment die Call History auf HTTP 2xx prüfen. HTTP 503 ist nur bei temporären Anny-API- oder Rückschreibefehlern vorgesehen und löst die dokumentierten Wiederholungen aus. Doppelte Zustellungen derselben `event_id` werden ohne erneute Zuweisung mit HTTP 200 bestätigt.
 
+Das produktive Uvicorn-Access-Log bleibt deaktiviert, solange das Webhook-Secret Teil der URL ist. Andernfalls würde das Secret durch die protokollierte Query-Zeichenfolge im Container-Log landen.
+
 Ein Deployment darf nicht stillschweigend eine leere Datenbank anlegen, wenn die bestehende Produktionsdatenbank erwartet wird.
 
 ## Rollback

@@ -20,6 +20,8 @@ Bei der lokalen Bestandsaufnahme wurde ein zuvor kopierter echter Anny-Token in 
 4. Service und Reverse Proxy mit minimalen Rechten betreiben und Datenbank-Backups verschlüsseln.
 5. Keine vollständigen Webhook-Payloads oder API-Header protokollieren.
 
+Da die historische Anny-Konfiguration das Webhook-Secret im Query-Parameter transportiert, läuft Uvicorn produktiv ohne Access-Log. Andernfalls würde die Request-URL das Secret in das Docker-Log schreiben. Technische Zustände werden über Healthcheck, Dashboard und die idempotente `webhook_events`-Tabelle überwacht.
+
 ## Dashboard-Zugriff
 
 Der neue Code arbeitet fail-closed: Fehlen `DASHBOARD_USERNAME` oder `DASHBOARD_PASSWORD`, liefern Dashboard und `/allocations` HTTP 503 statt Daten öffentlich auszugeben. Die Zugangsdaten dürfen nicht mit dem Webhook-Secret oder dem Anny-Token identisch sein. Basic Auth ist ausschließlich über die vorhandene HTTPS-Domain zulässig.

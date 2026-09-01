@@ -8,4 +8,4 @@ RUN pip install --no-cache-dir --requirement /app/requirements.txt
 COPY app.py /app/app.py
 COPY templates /app/templates
 EXPOSE 8099
-CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8099"]
+CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8099", "--no-access-log"]
