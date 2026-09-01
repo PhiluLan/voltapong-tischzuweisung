@@ -20,6 +20,8 @@ Notizen werden ergänzt <---  Ergebnis per PATCH zurückschreiben
 
 Der Dienst fragt die Buchung immer erneut bei Anny ab. Er vertraut dem Webhook deshalb nur für Ereignistyp und Buchungs-ID, nicht für die vollständigen Buchungsattribute.
 
+Dabei werden ausschließlich die benötigten Beziehungen `resource` und `service` angefordert. Kunden- und Bestelldaten werden nicht geladen; der produktive Token benötigt nur `b.bookings:read` und `b.bookings:update`.
+
 ## Ereignisverarbeitung
 
 Der Webhook akzeptiert die [offizielle Anny-Payload](https://docs.anny.co/en/articles/349740-webhooks) und mehrere historische Varianten. Die offizielle `event_id` wird 90 Tage gespeichert und macht wiederholte Zustellungen idempotent.

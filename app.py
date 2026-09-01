@@ -127,7 +127,9 @@ def http_json(method: str, path: str, body: Optional[dict] = None) -> dict:
 
 
 def fetch_booking(booking_id: str) -> dict:
-    return http_json("GET", f"/bookings/{booking_id}?include=resource,service,customer,order")
+    # Only these relationships are needed for allocation. Customer and order
+    # data stay out of this integration and the API token can remain minimal.
+    return http_json("GET", f"/bookings/{booking_id}?include=resource,service")
 
 
 def patch_booking(booking_id: str, attrs: Dict[str, Any]) -> dict:

@@ -93,6 +93,24 @@ def test_extract_event_uses_headers_and_defaults_event():
     ) == ("bookings.deleted", "13")
 
 
+def test_fetch_booking_requests_only_required_relationships(monkeypatch):
+    captured = {}
+
+    def fake_http_json(method, path, body=None):
+        captured.update(method=method, path=path, body=body)
+        return {"data": {"type": "bookings", "id": "42"}}
+
+    monkeypatch.setattr(app, "http_json", fake_http_json)
+
+    app.fetch_booking("42")
+
+    assert captured == {
+        "method": "GET",
+        "path": "/bookings/42?include=resource,service",
+        "body": None,
+    }
+
+
 def test_cancellation_detection_covers_status_and_timestamp():
     assert app.is_booking_canceled({"status": "cancelled"})[0] is True
     assert app.is_booking_canceled({"status": "confirmed", "canceled_at": "2026-09-01T12:00:00Z"})[0] is True
