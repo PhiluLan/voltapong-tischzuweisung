@@ -101,7 +101,15 @@ Damit ist der ursprüngliche Fehler „Storno in Anny, aber Tisch bleibt lokal b
 
 Version 3.1.0 erkennt Anny-Hauptbuchungen und deren `sub_bookings`. Eine Hauptbuchung mit zwei zusätzlich gewählten Tischressourcen wird als Familie mit insgesamt drei Tischzuweisungen verarbeitet. Die Hauptbuchung erhält zuerst die vollständige Kundenangabe, beispielsweise `Deine Tische: Tisch 1, Tisch 2, Tisch 3`; danach werden die technischen Unterbuchungen einzeln beschriftet. Storno oder Löschung einer Unterbuchung aktualisiert die Hauptbuchung und gibt deren Tisch wieder frei.
 
-Der produktiv gebaute Container bestand einen isolierten Smoke-Test mit Hauptbuchung plus zwei Unterbuchungen. Dabei wurden Produktions-Image und Compose-Umgebung verwendet, aber eine separate temporäre SQLite-Datei und abgefangene Anny-PATCH-Aufrufe. Ein echter neuer Gastbuchungs-/Mailtest für Version 3.1.0 ist noch ausstehend.
+Der produktiv gebaute Container bestand zunächst einen isolierten Smoke-Test mit Hauptbuchung plus zwei Unterbuchungen. Dabei wurden Produktions-Image und Compose-Umgebung verwendet, aber eine separate temporäre SQLite-Datei und abgefangene Anny-PATCH-Aufrufe.
+
+Am 2. September 2026 wurde anschließend ein echter Anny-End-to-End-Test durchgeführt. Die bestätigte Hauptbuchung `BB532852269` für den 5. Oktober 2026, 09:00–10:00 Uhr, enthielt zwei zusätzliche Tischressourcen. Der Allocator wies der Buchungsfamilie drei unterschiedliche Tische zu:
+
+- Hauptbuchung: `Tisch 1`
+- erste Unterbuchung: `Tisch 2`
+- zweite Unterbuchung: `Tisch 3`
+
+In Anny waren alle drei Buchungen bestätigt und miteinander verknüpft. Die Hauptbuchung enthielt intern `Auto-Allocation: Tisch 1, Tisch 2, Tisch 3` und als Kundenanmerkung `Deine Tische: Tisch 1, Tisch 2, Tisch 3`. Dieselbe vollständige Tischliste erschien in der Bestätigungsmail. Damit ist der reale Gastbuchungs-/Mailpfad für Version 3.1.0 nachgewiesen.
 
 ## Datenbankzustand nach Rollout
 
