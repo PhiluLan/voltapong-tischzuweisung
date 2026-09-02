@@ -55,7 +55,7 @@ DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "").strip()
 DASHBOARD_REFRESH_SECONDS = max(10, int(os.environ.get("DASHBOARD_REFRESH_SECONDS", "30")))
 DASHBOARD_TEMPLATE = Path(__file__).resolve().parent / "templates" / "dashboard.html"
 
-app = FastAPI(title="Volta Pong Tischzuweisung", version="3.1.0")
+app = FastAPI(title="Volta Pong Tischzuweisung", version="3.1.1")
 
 # Uvicorn runs this service with one worker. Serializing the complete
 # read/choose/write cycle prevents simultaneous webhooks from choosing the
@@ -573,6 +573,19 @@ def desired_patch_fields(tables: List[str], current_description: str, split: boo
         "note": f"{NOTE_PREFIX} {label}{note_suffix}".strip(),
         "description": new_desc.strip(),
     }
+
+
+def desired_sub_booking_patch_fields(
+    tables: List[str],
+    root_booking_number: str,
+    split: bool,
+) -> Dict[str, str]:
+    """Build a compact title for an Anny technical sub-booking."""
+    fields = desired_patch_fields(tables, "", split=split)
+    reference = str(root_booking_number or "").strip().lstrip("#")
+    relation = f"Zusatz zu #{reference}" if reference else "Zusatzbuchung"
+    fields["description"] = f"{fields['description']} — {relation}"
+    return fields
 
 
 def patch_hash(fields: Dict[str, str]) -> str:
@@ -1226,9 +1239,9 @@ def _ensure_family_allocation(
                 continue
             child_allocation = allocations_by_id[child_id]
             child_attrs = (member_responses[child_id].get("data") or {}).get("attributes") or {}
-            child_fields = desired_patch_fields(
+            child_fields = desired_sub_booking_patch_fields(
                 child_allocation.tables,
-                str(child_attrs.get("description") or ""),
+                str(root_attrs.get("number") or ""),
                 split=tables_are_split(child_allocation.tables),
             )
             child_patch = patch_if_needed(child_id, child_attrs, child_fields)

@@ -91,9 +91,41 @@ def test_main_booking_is_patched_first_with_all_optional_resource_tables(monkeyp
     assert patch_calls[0][1]["description"] == (
         "TISCHE: Tisch 1, Tisch 2, Tisch 3 — Geburtstag"
     )
+    assert patch_calls[1][1]["description"] == (
+        "TISCHE: Tisch 2 — Zusatz zu #BB-root"
+    )
+    assert patch_calls[2][1]["description"] == (
+        "TISCHE: Tisch 3 — Zusatz zu #BB-root"
+    )
+    assert patch_calls[1][1]["customer_note"] == "Deine Tische: Tisch 2"
+    assert patch_calls[2][1]["customer_note"] == "Deine Tische: Tisch 3"
     assert app.get_allocation("root").root_booking_id == "root"
     assert app.get_allocation("child-1").root_booking_id == "root"
     assert app.get_allocation("child-2").root_booking_id == "root"
+
+
+def test_sub_booking_title_is_compact_and_normalizes_parent_number():
+    fields = app.desired_sub_booking_patch_fields(
+        ["Tisch 4"],
+        "#BB123456789",
+        split=False,
+    )
+
+    assert fields == {
+        "customer_note": "Deine Tische: Tisch 4",
+        "note": "Auto-Allocation: Tisch 4",
+        "description": "TISCHE: Tisch 4 — Zusatz zu #BB123456789",
+    }
+
+
+def test_sub_booking_title_has_clear_fallback_without_parent_number():
+    fields = app.desired_sub_booking_patch_fields(
+        ["Tisch 4"],
+        "",
+        split=False,
+    )
+
+    assert fields["description"] == "TISCHE: Tisch 4 — Zusatzbuchung"
 
 
 def test_sub_booking_webhook_resolves_and_updates_main_booking(monkeypatch):
