@@ -1,6 +1,6 @@
 # 04 – Deployment and Rollback
 
-Stand: 1. September 2026
+Stand: 2. September 2026
 
 ## Aktueller Deployment-Mechanismus
 
@@ -15,7 +15,7 @@ Es gibt keine CI/CD-Workflowdatei und ein Push nach GitHub verändert Produktion
 7. Allocator-Container auf das neue Image umschalten,
 8. Health, Logs, Dashboard und Anny End-to-End prüfen.
 
-Der produktive Anwendungscode basiert beim Audit auf `c261d029d8929582aa8d0628267c79003e0093be`. Repository-`main` enthält danach zusätzliche Dokumentationscommits. Maßgeblich ist immer die explizit freigegebene Release-SHA, nicht „der neueste Stand“.
+Der produktive Anwendungscode basiert seit dem 2. September 2026 auf `6937aa89b9afb2c58409eb591fd4c952a70684ef`. Repository-`main` kann danach zusätzliche Dokumentationscommits enthalten. Maßgeblich ist immer die explizit freigegebene Release-SHA, nicht „der neueste Stand“.
 
 **HIGH PRIORITY:** Dieses Verfahren muss vor der Übergabe von einer zweiten Person in einer sicheren Umgebung beziehungsweise bei einem kontrollierten Release vollständig geprobt werden. Die Befehle unten entsprechen der verifizierten Topologie; ein automatisierter Release-Workflow existiert noch nicht.
 
@@ -47,7 +47,7 @@ git fetch --all --prune
 git status --short
 git rev-parse <RELEASE_SHA>
 git log -1 --oneline <RELEASE_SHA>
-git diff --stat c261d029d8929582aa8d0628267c79003e0093be..<RELEASE_SHA> -- app.py Dockerfile requirements.txt templates docker-compose.production.yml Caddyfile
+git diff --stat 6937aa89b9afb2c58409eb591fd4c952a70684ef..<RELEASE_SHA> -- app.py Dockerfile requirements.txt templates docker-compose.production.yml Caddyfile
 ```
 
 `git status --short` muss für einen unveränderten Release-Checkout leer sein. `<RELEASE_SHA>` muss ein vollständiger, reviewter Commit sein.
@@ -97,7 +97,7 @@ python3.11 -m venv .venv
 docker compose -f docker-compose.production.yml config --quiet
 ```
 
-Die Tests verwenden Dummy-Credentials und dürfen nicht gegen Produktion laufen. Der geprüfte Stand vom 1. September 2026 umfasst 32 Tests.
+Die Tests verwenden Dummy-Credentials und dürfen nicht gegen Produktion laufen. Der geprüfte Stand von Version 3.1.0 umfasst 39 Tests.
 
 ## 5. Release übertragen und Image bauen
 

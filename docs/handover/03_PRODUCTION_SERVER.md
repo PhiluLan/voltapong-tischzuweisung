@@ -1,6 +1,6 @@
 # 03 – Production Server
 
-Stand der zuletzt verifizierten Serverprüfung: 1. September 2026
+Stand der zuletzt verifizierten Serverprüfung: 2. September 2026
 
 ## Serversteckbrief
 
@@ -68,7 +68,7 @@ Das ist ein offener Härtungspunkt. Bis ein neuer namentlicher Admin-Key und der
 
 | Container | Image/Quelle | Ports | Mounts/Volumes | Restart | Health |
 | --- | --- | --- | --- | --- | --- |
-| `anny_webhook-allocator-1` | lokal aus Repository gebaut; OCI-Revision `c261d029...` | 8099 nur intern | `./data:/data` | `unless-stopped` | HTTP `/health`, 30 s, 5 s Timeout, 3 Retries |
+| `anny_webhook-allocator-1` | lokal aus Repository gebaut; OCI-Revision `6937aa89...` | 8099 nur intern | `./data:/data` | `unless-stopped` | HTTP `/health`, 30 s, 5 s Timeout, 3 Retries |
 | `anny_webhook-caddy-1` | `caddy:2` | Host 80/443 | `Caddyfile` read-only, `caddy_data`, `caddy_config` | `unless-stopped` | kein eigener Compose-Healthcheck |
 
 Allocator-Härtung in Compose:
@@ -87,7 +87,7 @@ Der Allocator benötigt genau einen Worker/eine aktive Instanz. Mehrere Containe
 - Containerpfad: `/data/allocator.db`
 - Connection-Timeout und `PRAGMA busy_timeout`: 30 Sekunden
 - Tabellen: `allocations`, `webhook_events`
-- beim Abschlussaudit: `PRAGMA integrity_check = ok`, 766 Allocations, 711 assigned, 55 unassigned, 0 erkannte Tischkollisionen, 0 retry-fähige Webhook-Fehler
+- nach Release 3.1.0: `PRAGMA integrity_check = ok`, 773 Allocations, 767 assigned, 6 unassigned, 0 erkannte Tischkollisionen, 0 retry-fähige Webhook-Fehler der letzten 24 Stunden
 
 Die Zahlen ändern sich laufend. Sie dienen nur als Referenz, nicht als Sollwert.
 
@@ -129,7 +129,7 @@ Keine vollständigen Webhook-Payloads, Authorization-Header oder Query-Strings i
 
 - öffentlich: `https://webhook.voltabreau.ch/health`
 - intern aus dem Docker-Netz/Container: `http://127.0.0.1:8099/health`
-- erwartete Felder: `ok=true`, `database=true`, `version=3.0.0`, UTC-Zeitstempel
+- erwartete Felder: `ok=true`, `database=true`, `version=3.1.0`, UTC-Zeitstempel
 
 Der Endpoint prüft eine SQLite-Abfrage. Er prüft nicht die Anny API, Webhook-Zustellung, Disk Space, Backups, DNS oder Tischkollisionen.
 

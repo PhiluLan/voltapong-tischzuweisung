@@ -73,7 +73,7 @@ docker compose -f docker-compose.production.yml build
 docker compose -f docker-compose.production.yml up -d
 ```
 
-Der Stand `c261d029d8929582aa8d0628267c79003e0093be` ist seit dem 1. September 2026 produktiv unter `https://webhook.voltabreau.ch` aktiv. Das geschützte Dashboard ist unter `https://webhook.voltabreau.ch/dashboard` erreichbar. Ein Git-Push löst derzeit noch kein automatisches Deployment aus.
+Der Stand `6937aa89b9afb2c58409eb591fd4c952a70684ef` (Version 3.1.0) ist seit dem 2. September 2026 produktiv unter `https://webhook.voltabreau.ch` aktiv. Das geschützte Dashboard ist unter `https://webhook.voltabreau.ch/dashboard` erreichbar. Ein Git-Push löst derzeit noch kein automatisches Deployment aus.
 
 ## Lokale Entwicklung
 

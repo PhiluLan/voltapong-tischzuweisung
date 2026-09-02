@@ -1,6 +1,6 @@
 # Technical Handover Package
 
-Stand der technischen Prüfung: 1. September 2026
+Stand der technischen Prüfung: 2. September 2026
 
 ## Zweck und Zielgruppe
 
@@ -28,7 +28,7 @@ Secrets müssen in einem von Volta Bräu kontrollierten Passwort-/Secret-Manager
 | DigitalOcean | virtueller Produktionsserver | Droplet in `fra1`, öffentliche IP `138.68.87.128` |
 | Ubuntu/Docker | Laufzeit | Ubuntu 24.04.3 LTS; zwei Compose-Container |
 | Caddy | HTTPS und Reverse Proxy | `webhook.voltabreau.ch` → interner Allocator-Port 8099 |
-| Allocator | Webhook, Anny-API, Dashboard, Tischzuweisung | Anwendungsversion 3.0.0; produktiver Code-Commit `c261d029...` |
+| Allocator | Webhook, Anny-API, Dashboard, Tischzuweisung | Anwendungsversion 3.1.0; produktiver Code-Commit `6937aa89...` |
 | SQLite | abgeleiteter Belegungs- und Eventzustand | `/opt/anny_webhook/data/allocator.db` |
 | Anny | führendes Buchungssystem | Webhook für create/update/delete; API read/update |
 | DNS | Domainauflösung | A-Record zeigt auf `138.68.87.128`; Nameserver bei Hosttech |
@@ -88,7 +88,7 @@ Fehlt einer der Punkte 1 bis 7, ist ein vollständiger Betrieb oder Wiederaufbau
 
 - **Buchungen und Kundendaten:** Anny
 - **freigegebener Code und Dokumentation:** GitHub `main`
-- **aktuell laufender Code:** OCI-Revision des laufenden Allocator-Images; am 1. September 2026 `c261d029d8929582aa8d0628267c79003e0093be`
+- **aktuell laufender Code:** OCI-Revision des laufenden Allocator-Images; am 2. September 2026 `6937aa89b9afb2c58409eb591fd4c952a70684ef`
 - **aktuelle Tischzuweisungen und verarbeitete Events:** produktive SQLite-Datei
 - **Secrets:** zukünftiger organisatorischer Secret-Manager; derzeitiger organisatorischer Speicherort ist nicht verifiziert
 - **Account- und Billing-Ownership:** jeweilige Providerverwaltung; derzeit teilweise ungeklärt

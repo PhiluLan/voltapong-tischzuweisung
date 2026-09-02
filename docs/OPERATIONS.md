@@ -13,7 +13,7 @@ Zu sichern beziehungsweise zu erfassen sind mindestens:
 - Containername, Image, Ports, Volumes und Restart-Policy
 - konsistentes Backup von `allocator.db`
 
-Der Root-Audit vom 1. September 2026 hat diese Punkte einschließlich mehrerer konsistenter Datenbank-Backups abgeschlossen. Nach isoliertem Smoke-Test und kontrolliertem End-to-End-Test läuft produktiv Commit `c261d029d8929582aa8d0628267c79003e0093be`. `/opt/anny_webhook/docker-compose.yml` und `Caddyfile` entsprechen `docker-compose.production.yml` beziehungsweise `Caddyfile` im Repository. Der belegte Live-Zustand steht in [CURRENT_STATE.md](CURRENT_STATE.md).
+Der Root-Audit vom 1. September 2026 hat diese Punkte einschließlich mehrerer konsistenter Datenbank-Backups abgeschlossen. Seit dem 2. September 2026 läuft produktiv Version 3.1.0 mit Commit `6937aa89b9afb2c58409eb591fd4c952a70684ef`. `/opt/anny_webhook/docker-compose.yml` und `Caddyfile` entsprechen `docker-compose.production.yml` beziehungsweise `Caddyfile` im Repository. Der belegte Live-Zustand steht in [CURRENT_STATE.md](CURRENT_STATE.md).
 
 ## Lokal prüfen
 

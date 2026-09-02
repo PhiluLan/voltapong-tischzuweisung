@@ -1,18 +1,18 @@
 # Aktueller Produktionsstand
 
-Stand: 1. September 2026, nach Live-Rollout und realem Storno-/Wiederbuchungstest.
+Stand: 2. September 2026, nach Live-Rollout von Version 3.1.0.
 
 ## Verbindlicher Stand
 
 - GitHub-Branch: `main`
-- produktiver Commit: `c261d029d8929582aa8d0628267c79003e0093be`
+- produktiver Commit: `6937aa89b9afb2c58409eb591fd4c952a70684ef`
 - öffentliche Adresse: `https://webhook.voltabreau.ch`
 - Dashboard: `https://webhook.voltabreau.ch/dashboard`
 - Server: DigitalOcean-Droplet `138.68.87.128`, Ubuntu 24.04.3 LTS
 - Anwendungspfad: `/opt/anny_webhook`
 - Datenbank: `/opt/anny_webhook/data/allocator.db`
 - Anny-Ressource: `181227` („Ping Pong Tisch“)
-- produktive Anwendungsversion: `3.0.0`
+- produktive Anwendungsversion: `3.1.0`
 
 `app.py`, Produktions-Compose-Datei und Caddyfile auf dem Server stimmen mit den geprüften Repository-Dateien überein. Das laufende Allocator-Image trägt den Git-Commit als OCI-Revision.
 
@@ -48,6 +48,9 @@ Vor dem Rollout wurden erstellt:
 - `/opt/anny_webhook/backups/20260901T194300Z-pre-v3/`: alte Anwendung, Konfiguration, konsistentes SQLite-Backup und Rollback-Image
 - `/opt/anny_webhook/backups/20260901T195900Z-postdeploy-pre-e2e.db`: konsistente Datenbank direkt vor dem End-to-End-Test
 - `/opt/anny_webhook/backups/20260901T203752Z-pre-dashboard-credentials/.env`: Konfiguration vor Änderung des Dashboard-Logins
+- `/opt/anny_webhook/backups/20260902T183231Z-pre-v3.1.0-allocator.db`: konsistentes SQLite-Backup unmittelbar vor Version 3.1.0
+- `/opt/anny_webhook/backups/20260902T183430Z-predeploy-v3.1.0/`: vorherige Produktionsdateien für den Rollback
+- Docker-Rollback-Tag `anny_webhook-allocator:rollback-20260902T183430Z`
 
 Die geprüften SQLite-Backups meldeten `PRAGMA integrity_check = ok`. Lokale Backups auf demselben Droplet ersetzen kein Offsite- oder DigitalOcean-Droplet-Backup.
 
@@ -55,7 +58,7 @@ Die geprüften SQLite-Backups meldeten `PRAGMA integrity_check = ok`. Lokale Bac
 
 ### Automatisierte Suite
 
-- 32 Tests erfolgreich
+- 39 Tests erfolgreich
 - Python-Kompilierung erfolgreich
 - Compose-Konfiguration gültig
 - isolierter Smoke-Test auf einer Kopie der Produktionsdatenbank erfolgreich
@@ -94,6 +97,12 @@ Für den 27. September 2026, 09:00–10:00 Uhr:
 
 Damit ist der ursprüngliche Fehler „Storno in Anny, aber Tisch bleibt lokal blockiert“ praktisch im Live-System behoben.
 
+### Zusätzliche Tischressourcen
+
+Version 3.1.0 erkennt Anny-Hauptbuchungen und deren `sub_bookings`. Eine Hauptbuchung mit zwei zusätzlich gewählten Tischressourcen wird als Familie mit insgesamt drei Tischzuweisungen verarbeitet. Die Hauptbuchung erhält zuerst die vollständige Kundenangabe, beispielsweise `Deine Tische: Tisch 1, Tisch 2, Tisch 3`; danach werden die technischen Unterbuchungen einzeln beschriftet. Storno oder Löschung einer Unterbuchung aktualisiert die Hauptbuchung und gibt deren Tisch wieder frei.
+
+Der produktiv gebaute Container bestand einen isolierten Smoke-Test mit Hauptbuchung plus zwei Unterbuchungen. Dabei wurden Produktions-Image und Compose-Umgebung verwendet, aber eine separate temporäre SQLite-Datei und abgefangene Anny-PATCH-Aufrufe. Ein echter neuer Gastbuchungs-/Mailtest für Version 3.1.0 ist noch ausstehend.
+
 ## Datenbankzustand nach Rollout
 
 Der Abschlussaudit meldete:
@@ -101,13 +110,13 @@ Der Abschlussaudit meldete:
 | Prüfung | Ergebnis |
 | --- | ---: |
 | SQLite-Integrität | `ok` |
-| Allocations gesamt | 766 |
-| Zugewiesen | 711 |
-| Nicht zugewiesen | 55 |
+| Allocations gesamt | 773 |
+| Zugewiesen | 767 |
+| Nicht zugewiesen | 6 |
 | Tischkollisionen | 0 |
 | retry-fähige Webhook-Fehler | 0 |
 
-Die Zahlen sind eine Momentaufnahme. Historische `unassigned`-Einträge können die Dashboard-Ampel weiterhin gelb machen, obwohl die aktuelle Storno-Logik korrekt arbeitet.
+Die Zahlen sind eine Momentaufnahme direkt nach dem Rollout. Zwei der sechs `unassigned`-Einträge lagen zu diesem Zeitpunkt noch in der Zukunft; deshalb war das Dashboard gelb. Es bestanden keine Tischkollisionen und keine retry-fähigen Webhook-Fehler der letzten 24 Stunden.
 
 ## Bekannter fachlicher Fehler: Anny-Kapazität gegen Tischbedarf
 

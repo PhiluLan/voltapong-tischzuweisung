@@ -1,6 +1,6 @@
 # 01 – System Overview
 
-Stand: 1. September 2026
+Stand: 2. September 2026
 
 ## Systemauftrag
 
@@ -52,12 +52,12 @@ GitHub ── manueller Release-Prozess ──► Produktionsserver
 | Produktionspfad | `/opt/anny_webhook` |
 | Datenbank | `/opt/anny_webhook/data/allocator.db` |
 | Container | `anny_webhook-allocator-1`, `anny_webhook-caddy-1` |
-| Anwendungsversion | 3.0.0 |
-| produktiver Code-Commit | `c261d029d8929582aa8d0628267c79003e0093be` |
+| Anwendungsversion | 3.1.0 |
+| produktiver Code-Commit | `6937aa89b9afb2c58409eb591fd4c952a70684ef` |
 | fachliche Zeitzone | `Europe/Zurich` |
 | Server-Zeitzone | UTC/`Etc/UTC` |
 
-Am Prüfzeitpunkt waren die produktionsrelevanten Dateien zwischen Commit `c261d029...` und dem damaligen Repository-`main` inhaltlich unverändert. Spätere Dokumentationscommits sind nicht automatisch auf Produktion ausgerollt.
+Das laufende Allocator-Image trägt Commit `6937aa89...` als OCI-Revision. Spätere reine Dokumentationscommits sind nicht automatisch auf Produktion ausgerollt.
 
 ## Wichtige Laufzeitannahmen
 

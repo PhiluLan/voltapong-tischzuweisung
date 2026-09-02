@@ -1,6 +1,6 @@
 # Laienhandbuch: Volta-Pong-Tischzuweisung
 
-Stand: 1. September 2026
+Stand: 2. September 2026
 
 ## Das System in einem Satz
 
@@ -93,7 +93,7 @@ SQLite ist eine kleine Datenbankdatei unter `/opt/anny_webhook/data/allocator.db
 
 ### GitHub
 
-GitHub enthält Quellcode, Tests und Dokumentation. Der produktive Code basiert aktuell auf Commit `c261d029d8929582aa8d0628267c79003e0093be`.
+GitHub enthält Quellcode, Tests und Dokumentation. Der produktive Code basiert aktuell auf Commit `6937aa89b9afb2c58409eb591fd4c952a70684ef` (Version 3.1.0).
 
 Wichtig: Ein Push nach GitHub wird derzeit noch nicht automatisch auf den Server ausgerollt. GitHub ist die freigegebene Code-Wahrheit; ein kontrollierter Deployment-Schritt macht daraus den laufenden Serverstand.
 
@@ -233,4 +233,3 @@ Ein Restore ist eine technische Notfallmaßnahme und wird nicht im normalen Betr
 - [OPERATIONS.md](OPERATIONS.md): Deployment, Backup und Rollback
 - [CURRENT_STATE.md](CURRENT_STATE.md): aktuell belegter Produktionsstand
 - [ZUKUNFT.md](ZUKUNFT.md): Bewertung der Infrastruktur und empfohlene Entwicklung
-
