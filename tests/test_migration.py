@@ -45,6 +45,10 @@ def test_init_db_adds_webhook_events_without_changing_allocations(tmp_path, monk
         event_table = connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='webhook_events'"
         ).fetchone()
+        allocation_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(allocations)").fetchall()
+        }
 
     assert allocation_count == 1
     assert event_table[0] == "webhook_events"
+    assert "root_booking_id" in allocation_columns

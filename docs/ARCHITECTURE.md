@@ -20,7 +20,7 @@ Notizen werden ergänzt <---  Ergebnis per PATCH zurückschreiben
 
 Der Dienst fragt die Buchung immer erneut bei Anny ab. Er vertraut dem Webhook deshalb nur für Ereignistyp und Buchungs-ID, nicht für die vollständigen Buchungsattribute.
 
-Dabei werden ausschließlich die benötigten Beziehungen `resource` und `service` angefordert. Kunden- und Bestelldaten werden nicht geladen; der produktive Token benötigt nur `b.bookings:read` und `b.bookings:update`.
+Dabei werden ausschließlich die technischen Beziehungen `resource`, `service`, `sub_bookings` und `super_booking` angefordert. Für Unterbuchungen werden Ressource und Service verschachtelt mitgeladen. Kunden- und Bestelldaten werden nicht geladen; der produktive Token benötigt nur `b.bookings:read` und `b.bookings:update`.
 
 ## Ereignisverarbeitung
 
@@ -39,6 +39,12 @@ Fachliche Kapazitätsprobleme werden mit HTTP 200 quittiert und als `unassigned`
 ### 1. Bedarf
 
 `compute_need(weight)` akzeptiert ganzzahlige Werte von 1 bis zur Anzahl konfigurierter Tische. Jeder fehlende, nicht numerische oder außerhalb dieses Bereichs liegende Wert wird auf einen Tisch normalisiert.
+
+### 1a. Zusätzliche Ressourcen
+
+Eine in Anny gewählte zusätzliche Ressource wird als eigene Unterbuchung modelliert. Die API-Beziehung `sub_bookings` führt von der Hauptbuchung zu diesen Datensätzen; `super_booking` führt zurück zur Hauptbuchung. Der Allocator löst deshalb bei jedem Ereignis zuerst die ganze Buchungsfamilie auf.
+
+Jedes aktive Familienmitglied behält aus Gründen der Nachvollziehbarkeit eine eigene SQLite-Zeile und eine eigene Tischzuweisung. Das Feld `root_booking_id` verbindet die Zeilen. Die Hauptbuchung wird jedoch zuerst und genau einmal mit der zusammengeführten Liste aller Tische gepatcht. So enthält die kundenrelevante Bestätigung beispielsweise `Deine Tische: Tisch 1, Tisch 2, Tisch 3`, während die technischen Unterbuchungen anschließend ihre jeweilige Teilzuweisung erhalten. Ein Ereignis einer Unterbuchung aktualisiert ebenfalls die Hauptbuchung. Wird eine Unterbuchung entfernt, verschwindet ihr Tisch aus der zusammengeführten Liste und die frei gewordene Kapazität kann nachverteilt werden.
 
 ### 2. Zeitüberschneidung
 
@@ -105,9 +111,10 @@ Tabelle `allocations`:
 | `tables_csv` | zugewiesene Labels |
 | `status` | `assigned` oder `unassigned` |
 | `last_patch_hash`, `patched_at` | Metadaten des letzten Rückschreibens |
+| `root_booking_id` | verbindet Haupt- und Unterbuchungen derselben Anny-Buchungsfamilie |
 | `created_at`, `updated_at` | lokale Zeitstempel |
 
-Indizes bestehen auf Zeitfenster und Ressource. Die Datenbank wird beim Import der Anwendung initialisiert und um ältere fehlende Spalten ergänzt.
+Indizes bestehen auf Zeitfenster, Ressource und Hauptbuchung. Die Datenbank wird beim Import der Anwendung initialisiert und um ältere fehlende Spalten ergänzt.
 
 Tabelle `webhook_events`:
 

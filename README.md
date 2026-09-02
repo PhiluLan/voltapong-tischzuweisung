@@ -27,13 +27,14 @@ Der aktuelle Entwicklungsstand arbeitet so:
 1. Die Anny-`event_id` verhindert doppelte Verarbeitung wiederholter Zustellungen.
 2. Nur konfigurierte Anny-Ressourcen werden berücksichtigt.
 3. Der Buchungswert `weight` bestimmt die Anzahl benötigter Tische; fehlt oder passt er nicht, gilt `1`.
-4. Überschneidende, bereits zugewiesene Buchungen derselben Ressource markieren Tische als belegt.
-5. Der Dienst wählt zuerst eine zusammenhängende Tischgruppe, danach beliebige freie Tische.
-6. Erscheint die Kapazität lokal voll, werden die Blocker nochmals bei Anny geprüft. Bestätigte Stornos und gelöschte Buchungen werden entfernt und die Tischwahl wird wiederholt.
-7. Bei `bookings.deleted`, Storno oder einer kapazitätsrelevanten Änderung wird der alte Zeitraum freigegeben. Passende `unassigned`-Buchungen werden anschließend geordnet erneut versucht.
-8. Echte Änderungen an Zeitraum, Ressource oder `weight` werden auch dann verarbeitet, wenn die Buchung bereits die eigene Tischmarkierung enthält.
-9. Temporäre Anny-GET- oder PATCH-Fehler liefern HTTP 503. Anny kann dasselbe Ereignis anschließend sicher erneut zustellen.
-10. Die Zuweisung wird in `customer_note`, `note` und einem verwalteten Abschnitt der `description` geschrieben.
+4. Eine in Anny gewählte zusätzliche Ressource wird als `sub_booking` erkannt. Haupt- und Unterbuchungen werden gemeinsam verarbeitet und die Hauptbuchung erhält die vollständige Tischliste.
+5. Überschneidende, bereits zugewiesene Buchungen derselben Ressource markieren Tische als belegt.
+6. Der Dienst wählt zuerst eine zusammenhängende Tischgruppe, danach beliebige freie Tische.
+7. Erscheint die Kapazität lokal voll, werden die Blocker nochmals bei Anny geprüft. Bestätigte Stornos und gelöschte Buchungen werden entfernt und die Tischwahl wird wiederholt.
+8. Bei `bookings.deleted`, Storno oder einer kapazitätsrelevanten Änderung wird der alte Zeitraum freigegeben. Passende `unassigned`-Buchungen werden anschließend geordnet erneut versucht.
+9. Echte Änderungen an Zeitraum, Ressource oder `weight` werden auch dann verarbeitet, wenn die Buchung bereits die eigene Tischmarkierung enthält.
+10. Temporäre Anny-GET- oder PATCH-Fehler liefern HTTP 503. Anny kann dasselbe Ereignis anschließend sicher erneut zustellen.
+11. Die Zuweisung wird in `customer_note`, `note` und einem verwalteten Abschnitt der `description` geschrieben.
 
 Eine detaillierte Beschreibung steht in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Der rekonstruierte Ist-Zustand und alle bekannten Risiken stehen in [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md).
 

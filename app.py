@@ -55,7 +55,7 @@ DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "").strip()
 DASHBOARD_REFRESH_SECONDS = max(10, int(os.environ.get("DASHBOARD_REFRESH_SECONDS", "30")))
 DASHBOARD_TEMPLATE = Path(__file__).resolve().parent / "templates" / "dashboard.html"
 
-app = FastAPI(title="Volta Pong Tischzuweisung", version="3.0.0")
+app = FastAPI(title="Volta Pong Tischzuweisung", version="3.1.0")
 
 # Uvicorn runs this service with one worker. Serializing the complete
 # read/choose/write cycle prevents simultaneous webhooks from choosing the
@@ -127,9 +127,14 @@ def http_json(method: str, path: str, body: Optional[dict] = None) -> dict:
 
 
 def fetch_booking(booking_id: str) -> dict:
-    # Only these relationships are needed for allocation. Customer and order
-    # data stay out of this integration and the API token can remain minimal.
-    return http_json("GET", f"/bookings/{booking_id}?include=resource,service")
+    # Include only technical relationships used by the allocator. In
+    # particular, Anny represents an optional additional resource as one or
+    # more sub-bookings. Customer and order data stay out of this integration.
+    includes = (
+        "resource,service,sub_bookings,sub_bookings.resource,"
+        "sub_bookings.service,super_booking"
+    )
+    return http_json("GET", f"/bookings/{booking_id}?include={includes}")
 
 
 def patch_booking(booking_id: str, attrs: Dict[str, Any]) -> dict:
@@ -171,6 +176,7 @@ def init_db():
                 status TEXT,
                 last_patch_hash TEXT,
                 patched_at TEXT,
+                root_booking_id TEXT,
                 created_at TEXT,
                 updated_at TEXT
             )
@@ -187,12 +193,15 @@ def init_db():
             conn.execute("ALTER TABLE allocations ADD COLUMN last_patch_hash TEXT")
         if "patched_at" not in cols:
             conn.execute("ALTER TABLE allocations ADD COLUMN patched_at TEXT")
+        if "root_booking_id" not in cols:
+            conn.execute("ALTER TABLE allocations ADD COLUMN root_booking_id TEXT")
 
         conn.commit()
 
         # 3) indexes last
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alloc_time ON allocations(start_date, end_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alloc_resource ON allocations(resource_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alloc_root_booking ON allocations(root_booking_id)")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS webhook_events (
@@ -226,6 +235,7 @@ class Allocation:
     status: str
     last_patch_hash: str = ""
     patched_at: str = ""
+    root_booking_id: str = ""
 
 
 def get_allocation(booking_id: str) -> Optional[Allocation]:
@@ -245,7 +255,17 @@ def get_allocation(booking_id: str) -> Optional[Allocation]:
             status=row["status"] or "assigned",
             last_patch_hash=(row["last_patch_hash"] or ""),
             patched_at=(row["patched_at"] or ""),
+            root_booking_id=(row["root_booking_id"] or ""),
         )
+
+
+def list_family_allocations(root_booking_id: str) -> List[Allocation]:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT booking_id FROM allocations WHERE root_booking_id=? OR booking_id=?",
+            (str(root_booking_id), str(root_booking_id)),
+        ).fetchall()
+    return [allocation for row in rows if (allocation := get_allocation(row["booking_id"]))]
 
 
 def upsert_allocation(a: Allocation):
@@ -254,9 +274,9 @@ def upsert_allocation(a: Allocation):
             """
             INSERT INTO allocations (
               booking_id, booking_number, resource_id, service_id, start_date, end_date, need, tables_csv, status,
-              last_patch_hash, patched_at, created_at, updated_at
+              last_patch_hash, patched_at, root_booking_id, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(booking_id) DO UPDATE SET
                 booking_number=excluded.booking_number,
                 resource_id=excluded.resource_id,
@@ -268,6 +288,7 @@ def upsert_allocation(a: Allocation):
                 status=excluded.status,
                 last_patch_hash=excluded.last_patch_hash,
                 patched_at=excluded.patched_at,
+                root_booking_id=excluded.root_booking_id,
                 updated_at=excluded.updated_at
             """,
             (
@@ -282,6 +303,7 @@ def upsert_allocation(a: Allocation):
                 a.status,
                 a.last_patch_hash or "",
                 a.patched_at or "",
+                a.root_booking_id or a.booking_id,
                 iso_now(),
                 iso_now(),
             ),
@@ -301,6 +323,15 @@ def touch_patch_meta(booking_id: str, patch_hash: str):
 def delete_allocation(booking_id: str):
     with db() as conn:
         conn.execute("DELETE FROM allocations WHERE booking_id=?", (str(booking_id),))
+        conn.commit()
+
+
+def delete_family_allocations(root_booking_id: str):
+    with db() as conn:
+        conn.execute(
+            "DELETE FROM allocations WHERE root_booking_id=? OR booking_id=?",
+            (str(root_booking_id), str(root_booking_id)),
+        )
         conn.commit()
 
 
@@ -398,6 +429,7 @@ def list_overlapping_allocations(
                     status=r["status"] or "assigned",
                     last_patch_hash=(r["last_patch_hash"] or ""),
                     patched_at=(r["patched_at"] or ""),
+                    root_booking_id=(r["root_booking_id"] or ""),
                 )
             )
     return out
@@ -661,9 +693,15 @@ def cleanup_stale_overlapping_allocations(
     }
 
 
-def _ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]:
+def _ensure_allocation_for_booking(
+    booking_id: str,
+    event: str,
+    booking_json: Optional[Dict[str, Any]] = None,
+    perform_patch: bool = True,
+    root_booking_id: str = "",
+) -> Dict[str, Any]:
     existing = get_allocation(str(booking_id))
-    bj = fetch_booking(str(booking_id))
+    bj = booking_json if booking_json is not None else fetch_booking(str(booking_id))
     if "errors" in bj:
         if response_is_not_found(bj):
             delete_allocation(str(booking_id))
@@ -746,6 +784,22 @@ def _ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any
             ex_s, ex_e = window_start, window_end
 
         if ex_s == window_start and ex_e == window_end and existing.need == need and existing.tables:
+            if root_booking_id and existing.root_booking_id != root_booking_id:
+                existing.root_booking_id = root_booking_id
+                upsert_allocation(existing)
+            if not perform_patch:
+                return {
+                    "ok": True,
+                    "booking_id": str(booking_id),
+                    "booking_number": booking_number,
+                    "resource_id": resource_id,
+                    "service_id": service_id,
+                    "need": need,
+                    "tables": existing.tables,
+                    "reused": True,
+                    "mode": "reused",
+                    "patch_deferred": True,
+                }
             fields = desired_patch_fields(
                 existing.tables,
                 description,
@@ -816,18 +870,10 @@ def _ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any
                 need=need,
                 tables=[],
                 status="unassigned",
+                root_booking_id=root_booking_id or str(booking_id),
             )
         )
-        patch_res = patch_if_needed(
-            str(booking_id),
-            attrs,
-            {
-                "customer_note": warn,
-                "note": warn,
-                "description": managed_description(description, warn),
-            },
-        )
-        return patch_result_or_retryable_failure({
+        result = {
             "ok": False,
             "reason": "NOT_ENOUGH_FREE_TABLES",
             "capacity_reason": "NOT_ENOUGH_FREE_TABLES",
@@ -839,7 +885,20 @@ def _ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any
             "need": need,
             "busy": busy,
             "reconciliation": reconciliation,
-        }, patch_res)
+        }
+        if not perform_patch:
+            result["patch_deferred"] = True
+            return result
+        patch_res = patch_if_needed(
+            str(booking_id),
+            attrs,
+            {
+                "customer_note": warn,
+                "note": warn,
+                "description": managed_description(description, warn),
+            },
+        )
+        return patch_result_or_retryable_failure(result, patch_res)
 
     # Persist allocation
     upsert_allocation(
@@ -853,13 +912,11 @@ def _ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any
             need=need,
             tables=group,
             status="assigned",
+            root_booking_id=root_booking_id or str(booking_id),
         )
     )
 
-    fields = desired_patch_fields(group, description, split=split)
-    patch_res = patch_if_needed(str(booking_id), attrs, fields)
-
-    result = patch_result_or_retryable_failure({
+    result = {
         "ok": True,
         "booking_id": str(booking_id),
         "booking_number": booking_number,
@@ -869,7 +926,14 @@ def _ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any
         "tables": group,
         "mode": mode,
         "reconciliation": reconciliation,
-    }, patch_res)
+    }
+    if not perform_patch:
+        result["patch_deferred"] = True
+        return result
+
+    fields = desired_patch_fields(group, description, split=split)
+    patch_res = patch_if_needed(str(booking_id), attrs, fields)
+    result = patch_result_or_retryable_failure(result, patch_res)
     if not patch_res.get("ok") and (not existing or existing.status != "assigned"):
         # A brand-new/retried allocation is not acknowledged until Anny also
         # contains the table note. Keeping it unassigned lets the same event or
@@ -885,15 +949,371 @@ def _ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any
                 need=need,
                 tables=[],
                 status="unassigned",
+                root_booking_id=root_booking_id or str(booking_id),
             )
         )
         result["allocation_rolled_back"] = True
     return result
 
 
+def relationship_id(data: Dict[str, Any], name: str) -> str:
+    relationship = ((data.get("relationships") or {}).get(name) or {}).get("data")
+    if isinstance(relationship, dict):
+        return str(relationship.get("id") or "")
+    return ""
+
+
+def relationship_ids(data: Dict[str, Any], name: str) -> List[str]:
+    relationship = ((data.get("relationships") or {}).get(name) or {}).get("data")
+    if not isinstance(relationship, list):
+        return []
+    return [str(item.get("id")) for item in relationship if isinstance(item, dict) and item.get("id")]
+
+
+def included_bookings(response: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    return {
+        str(item.get("id")): item
+        for item in response.get("included") or []
+        if isinstance(item, dict) and item.get("type") == "bookings" and item.get("id")
+    }
+
+
+def allocation_capacity_keys(allocations: List[Allocation]) -> set:
+    return {
+        (allocation.resource_id, allocation.start_date, allocation.end_date, table)
+        for allocation in allocations
+        if allocation.status == "assigned"
+        for table in allocation.tables
+    }
+
+
+def released_family_windows(
+    before: List[Allocation],
+    after: List[Allocation],
+) -> List[Dict[str, str]]:
+    released = allocation_capacity_keys(before) - allocation_capacity_keys(after)
+    windows = {
+        (resource_id, start_date, end_date)
+        for resource_id, start_date, end_date, _table in released
+        if resource_id and start_date and end_date
+    }
+    return [
+        {
+            "resource_id": resource_id,
+            "window_start": start_date,
+            "window_end": end_date,
+        }
+        for resource_id, start_date, end_date in sorted(windows)
+    ]
+
+
+def rollback_deferred_family_allocations(
+    member_ids: List[str],
+    previous_by_id: Dict[str, Allocation],
+    root_booking_id: str,
+) -> None:
+    """Undo capacity that was never confirmed on the Anny main booking."""
+    for member_id in member_ids:
+        previous = previous_by_id.get(member_id)
+        if previous and previous.status == "assigned" and previous.tables:
+            upsert_allocation(previous)
+            continue
+        current = get_allocation(member_id)
+        if current:
+            current.tables = []
+            current.status = "unassigned"
+            current.root_booking_id = root_booking_id
+            upsert_allocation(current)
+
+
+def _ensure_family_allocation(
+    root_booking_id: str,
+    root_response: Dict[str, Any],
+    trigger_booking_id: str,
+    event: str,
+) -> Dict[str, Any]:
+    """Allocate an Anny main booking and its optional resources as one family.
+
+    Anny models each optional resource as a sub-booking. Allocations remain one
+    SQLite row per booking for traceability, while the main booking is patched
+    first and exactly once with the complete table list used in confirmations.
+    """
+    root_data = root_response.get("data") or {}
+    root_attrs = root_data.get("attributes") or {}
+    root_canceled, root_status, root_canceled_at = is_booking_canceled(root_attrs)
+    before_family = list_family_allocations(root_booking_id)
+
+    if root_canceled:
+        delete_family_allocations(root_booking_id)
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "BOOKING_FAMILY_CANCELED_DB_CLEANED",
+            "booking_id": root_booking_id,
+            "trigger_booking_id": trigger_booking_id,
+            "status": root_status,
+            "canceled_at": root_canceled_at,
+            "family": True,
+            "family_size": len(before_family),
+            "family_released_windows": released_family_windows(before_family, []),
+        }
+
+    sub_booking_ids = relationship_ids(root_data, "sub_bookings")
+    member_ids = [root_booking_id] + [
+        booking_id for booking_id in sub_booking_ids if booking_id != root_booking_id
+    ]
+    included = included_bookings(root_response)
+    member_responses: Dict[str, Dict[str, Any]] = {root_booking_id: root_response}
+
+    # Resolve the complete family before changing SQLite. The nested includes
+    # normally make this a single request; the fallback keeps the code robust
+    # if Anny omits one included record temporarily.
+    for member_id in member_ids[1:]:
+        if member_id in included:
+            member_responses[member_id] = {"data": included[member_id]}
+            continue
+        response = fetch_booking(member_id)
+        if response.get("errors"):
+            if response_is_not_found(response):
+                delete_allocation(member_id)
+                continue
+            return {
+                "ok": False,
+                "reason": "FETCH_FAMILY_MEMBER_FAILED",
+                "retryable": True,
+                "booking_id": root_booking_id,
+                "trigger_booking_id": trigger_booking_id,
+                "family": True,
+                "failed_member_id": member_id,
+                "errors": response.get("errors") or [],
+            }
+        member_responses[member_id] = response
+
+    member_ids = [member_id for member_id in member_ids if member_id in member_responses]
+    active_ids = set(member_ids)
+    for stale in before_family:
+        if stale.booking_id not in active_ids:
+            delete_allocation(stale.booking_id)
+
+    previous_by_id = {allocation.booking_id: allocation for allocation in before_family}
+    member_results: List[Dict[str, Any]] = []
+    managed_ids: List[str] = []
+    processed_ids: List[str] = []
+
+    for member_id in member_ids:
+        member_result = _ensure_allocation_for_booking(
+            member_id,
+            event=event,
+            booking_json=member_responses[member_id],
+            perform_patch=False,
+            root_booking_id=root_booking_id,
+        )
+        member_results.append(member_result)
+        processed_ids.append(member_id)
+        if member_result.get("retryable"):
+            rollback_deferred_family_allocations(
+                processed_ids,
+                previous_by_id,
+                root_booking_id,
+            )
+            return {
+                "ok": False,
+                "reason": str(member_result.get("reason") or "FAMILY_MEMBER_FAILED"),
+                "retryable": True,
+                "booking_id": root_booking_id,
+                "trigger_booking_id": trigger_booking_id,
+                "family": True,
+                "members": member_results,
+            }
+        if not member_result.get("ignored") and member_result.get("need") is not None:
+            managed_ids.append(member_id)
+
+    allocations_by_id = {
+        member_id: allocation
+        for member_id in managed_ids
+        if (allocation := get_allocation(member_id)) is not None
+    }
+    assigned_ids = [
+        member_id
+        for member_id in managed_ids
+        if allocations_by_id.get(member_id)
+        and allocations_by_id[member_id].status == "assigned"
+        and allocations_by_id[member_id].tables
+    ]
+    all_assigned = bool(managed_ids) and len(assigned_ids) == len(managed_ids)
+    tables = [
+        table
+        for member_id in managed_ids
+        if member_id in allocations_by_id
+        for table in allocations_by_id[member_id].tables
+    ]
+    total_need = sum(
+        int(result.get("need") or 0)
+        for result in member_results
+        if not result.get("ignored")
+    )
+
+    if not managed_ids:
+        return {
+            "ok": True,
+            "ignored": True,
+            "booking_id": root_booking_id,
+            "trigger_booking_id": trigger_booking_id,
+            "family": True,
+            "family_size": len(member_ids),
+            "members": member_results,
+        }
+
+    if all_assigned:
+        fields = desired_patch_fields(
+            tables,
+            str(root_attrs.get("description") or ""),
+            split=tables_are_split(tables),
+        )
+    else:
+        warning = f"{MARKER} Keine freien {total_need} Tische verfügbar (bitte manuell zuweisen)."
+        fields = {
+            "customer_note": warning,
+            "note": warning,
+            "description": managed_description(str(root_attrs.get("description") or ""), warning),
+        }
+
+    # Patch the customer-visible main booking before its technical
+    # sub-bookings. This prevents a confirmation from seeing only the first
+    # table when all family members arrived in the same webhook cycle.
+    root_patch = patch_if_needed(root_booking_id, root_attrs, fields)
+    result: Dict[str, Any] = {
+        "ok": all_assigned,
+        "booking_id": root_booking_id,
+        "booking_number": str(root_attrs.get("number") or ""),
+        "trigger_booking_id": trigger_booking_id,
+        "family": True,
+        "family_size": len(member_ids),
+        "managed_family_size": len(managed_ids),
+        "need": total_need,
+        "tables": tables,
+        "members": member_results,
+        "patch": root_patch,
+    }
+
+    if not root_patch.get("ok"):
+        # Mirror the single-booking fail-safe: newly acknowledged capacity is
+        # not allowed to block tables until the main Anny booking contains the
+        # full assignment. Existing confirmed allocations remain intact.
+        rollback_deferred_family_allocations(
+            managed_ids,
+            previous_by_id,
+            root_booking_id,
+        )
+        result.update(
+            {
+                "ok": False,
+                "reason": "ANNY_PATCH_FAILED",
+                "retryable": True,
+                "allocation_rolled_back": True,
+            }
+        )
+        result["family_released_windows"] = released_family_windows(
+            before_family,
+            list_family_allocations(root_booking_id),
+        )
+        return result
+
+    child_patches: List[Dict[str, Any]] = []
+    if all_assigned:
+        for child_id in managed_ids:
+            if child_id == root_booking_id:
+                continue
+            child_allocation = allocations_by_id[child_id]
+            child_attrs = (member_responses[child_id].get("data") or {}).get("attributes") or {}
+            child_fields = desired_patch_fields(
+                child_allocation.tables,
+                str(child_attrs.get("description") or ""),
+                split=tables_are_split(child_allocation.tables),
+            )
+            child_patch = patch_if_needed(child_id, child_attrs, child_fields)
+            child_patches.append({"booking_id": child_id, "patch": child_patch})
+            if not child_patch.get("ok"):
+                result.update(
+                    {
+                        "ok": False,
+                        "reason": "ANNY_SUB_BOOKING_PATCH_FAILED",
+                        "retryable": True,
+                    }
+                )
+                break
+    else:
+        result.update(
+            {
+                "reason": "NOT_ENOUGH_FREE_TABLES_FOR_FAMILY",
+                "capacity_reason": "NOT_ENOUGH_FREE_TABLES",
+                "retryable": False,
+            }
+        )
+
+    result["child_patches"] = child_patches
+    result["family_released_windows"] = released_family_windows(
+        before_family,
+        list_family_allocations(root_booking_id),
+    )
+    return result
+
+
+def _ensure_booking_or_family(booking_id: str, event: str) -> Dict[str, Any]:
+    booking_id = str(booking_id)
+    response = fetch_booking(booking_id)
+    if response.get("errors"):
+        return _ensure_allocation_for_booking(
+            booking_id,
+            event,
+            booking_json=response,
+        )
+
+    data = response.get("data") or {}
+    attrs = data.get("attributes") or {}
+    super_booking_id = relationship_id(data, "super_booking")
+    root_booking_id = super_booking_id or booking_id
+    root_response = response
+    if super_booking_id:
+        root_response = fetch_booking(root_booking_id)
+        if root_response.get("errors"):
+            return {
+                "ok": False,
+                "reason": "FETCH_SUPER_BOOKING_FAILED",
+                "retryable": True,
+                "booking_id": booking_id,
+                "root_booking_id": root_booking_id,
+                "errors": root_response.get("errors") or [],
+            }
+
+    root_data = root_response.get("data") or {}
+    sub_booking_ids = relationship_ids(root_data, "sub_bookings")
+    known_family = list_family_allocations(root_booking_id)
+    is_family = bool(
+        super_booking_id
+        or attrs.get("is_sub_booking")
+        or sub_booking_ids
+        or len(known_family) > 1
+    )
+    if not is_family:
+        return _ensure_allocation_for_booking(
+            booking_id,
+            event,
+            booking_json=response,
+            root_booking_id=booking_id,
+        )
+
+    return _ensure_family_allocation(
+        root_booking_id,
+        root_response,
+        trigger_booking_id=booking_id,
+        event=event,
+    )
+
+
 def ensure_allocation_for_booking(booking_id: str, event: str) -> Dict[str, Any]:
     with ALLOCATION_LOCK:
-        return _ensure_allocation_for_booking(booking_id, event)
+        return _ensure_booking_or_family(booking_id, event)
 
 
 def allocation_released_capacity(before: Optional[Allocation], after: Optional[Allocation]) -> bool:
@@ -935,7 +1355,7 @@ def redistribute_unassigned(
 
     for candidate_id in candidate_ids:
         summary["checked"] += 1
-        result = _ensure_allocation_for_booking(candidate_id, event="internal.redistribution")
+        result = _ensure_booking_or_family(candidate_id, event="internal.redistribution")
         current = get_allocation(candidate_id)
         booking_number = str(result.get("booking_number") or (current.booking_number if current else ""))
         if result.get("retryable"):
@@ -979,15 +1399,34 @@ def process_booking_event(
         before = get_allocation(booking_id)
 
         if event == "bookings.deleted":
-            delete_allocation(booking_id)
-            result: Dict[str, Any] = {
-                "ok": True,
-                "event": event,
-                "booking_id": booking_id,
-                "deleted": before is not None,
-            }
+            root_booking_id = before.root_booking_id if before else ""
+            if root_booking_id and root_booking_id != booking_id:
+                result = _ensure_booking_or_family(
+                    root_booking_id,
+                    event="internal.family_member_deleted",
+                )
+                if result.get("reason") == "BOOKING_NOT_FOUND_DB_CLEANED":
+                    delete_family_allocations(root_booking_id)
+                result.update(
+                    {
+                        "event": event,
+                        "deleted_booking_id": booking_id,
+                        "deleted": before is not None,
+                    }
+                )
+            else:
+                if root_booking_id == booking_id:
+                    delete_family_allocations(booking_id)
+                else:
+                    delete_allocation(booking_id)
+                result = {
+                    "ok": True,
+                    "event": event,
+                    "booking_id": booking_id,
+                    "deleted": before is not None,
+                }
         else:
-            result = _ensure_allocation_for_booking(booking_id, event=event)
+            result = _ensure_booking_or_family(booking_id, event=event)
             result["event"] = event
 
         after = get_allocation(booking_id)
@@ -1005,6 +1444,18 @@ def process_booking_event(
                 windows.append((parse_iso(after.start_date), parse_iso(after.end_date), after.resource_id))
             except Exception:
                 pass
+
+        for released_window in result.get("family_released_windows") or []:
+            try:
+                windows.append(
+                    (
+                        parse_iso(str(released_window["window_start"])),
+                        parse_iso(str(released_window["window_end"])),
+                        str(released_window["resource_id"]),
+                    )
+                )
+            except Exception:
+                continue
 
         for retry_window in retry_windows or []:
             if not retry_window.get("error_count"):

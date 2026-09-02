@@ -106,7 +106,10 @@ def test_fetch_booking_requests_only_required_relationships(monkeypatch):
 
     assert captured == {
         "method": "GET",
-        "path": "/bookings/42?include=resource,service",
+        "path": (
+            "/bookings/42?include=resource,service,sub_bookings,"
+            "sub_bookings.resource,sub_bookings.service,super_booking"
+        ),
         "body": None,
     }
 
